@@ -1,5 +1,10 @@
 using Forge.Cli.Commands;
+using Forge.Core.Configuration;
 using Spectre.Console.Cli;
+
+// Forge's own credentials, before anything can need them. Agents never see these:
+// the tool executor builds a scrubbed environment for every command it runs.
+EnvFile.Load();
 
 var app = new CommandApp();
 app.Configure(config =>
@@ -8,6 +13,21 @@ app.Configure(config =>
 
     config.AddCommand<LogCommand>("log")
         .WithDescription("Replay the project's conversation/decision trail and token spend from SQLite.");
+
+    config.AddCommand<ChatCommand>("chat")
+        .WithDescription("Talk to the Project Manager — intake, requirements, status. The client's only interface.");
+
+    config.AddCommand<RunCommand>("run")
+        .WithDescription("Claim the next ready task and run an agent against it (v1: one serial worker).");
+
+    config.AddBranch("task", task =>
+    {
+        task.SetDescription("Put work on the board and inspect it.");
+        task.AddCommand<TaskAddCommand>("add")
+            .WithDescription("Create a task. Until M3 the Principal isn't generating these yet.");
+        task.AddCommand<TaskListCommand>("list")
+            .WithDescription("Show the task board with status, budget, and progress notes.");
+    });
 
     config.AddBranch("project", project =>
     {

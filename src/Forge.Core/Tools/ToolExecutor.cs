@@ -20,10 +20,17 @@ public sealed partial class ToolExecutor(
     string jailRoot,
     IReadOnlyCollection<string> allowedBinaries,
     SecretsVault vault,
-    TimeSpan? defaultTimeout = null)
+    TimeSpan? defaultTimeout = null,
+    IReadOnlyDictionary<string, string>? environment = null)
 {
-    private readonly string _jailRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(jailRoot));
+    private readonly PathJail _jail = new(jailRoot);
     private readonly TimeSpan _defaultTimeout = defaultTimeout ?? TimeSpan.FromMinutes(5);
+
+    /// <summary>Extra variables to hand child processes, on top of the allowlist.</summary>
+    private readonly IReadOnlyDictionary<string, string> _environment =
+        environment ?? new Dictionary<string, string>();
+
+    public PathJail Jail => _jail;
 
     [GeneratedRegex(@"\{\{secret:([A-Za-z0-9_]+)\}\}")]
     private static partial Regex SecretRef();
@@ -62,6 +69,7 @@ public sealed partial class ToolExecutor(
             UseShellExecute = false,
         };
         foreach (var arg in finalArgv.Skip(1)) psi.ArgumentList.Add(arg);
+        ScrubEnvironment(psi);
 
         using var process = new Process { StartInfo = psi };
         process.Start();
@@ -87,12 +95,45 @@ public sealed partial class ToolExecutor(
         return new ToolResult(timedOut ? -1 : process.ExitCode, stdout, stderr, timedOut);
     }
 
+    /// <summary>
+    /// Child processes would otherwise inherit Forge's whole environment — which
+    /// holds the harness's own provider keys. An agent's `dotnet run` on code it
+    /// just wrote is arbitrary code execution, so inheritance is a credential leak.
+    /// Build the environment from an allowlist instead: a key added to forge_env
+    /// tomorrow is invisible to agents by default, with nothing to remember.
+    ///
+    /// HOME points at the workspace so a child cannot read ~/forge_env either.
+    /// This raises the bar; it is not a sandbox. Real isolation is a container,
+    /// and that is a later problem than M1.
+    /// </summary>
+    private void ScrubEnvironment(ProcessStartInfo psi)
+    {
+        var inherited = psi.Environment;
+        var passThrough = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in PassThroughNames)
+            if (inherited.TryGetValue(name, out var value) && value is not null)
+                passThrough[name] = value;
+
+        // Toolchain caches are shared on purpose: re-downloading NuGet packages
+        // for every task would make the jail expensive rather than safe.
+        foreach (var (name, value) in inherited)
+            if (value is not null && (name.StartsWith("DOTNET_", StringComparison.Ordinal) ||
+                                      name.StartsWith("NUGET_", StringComparison.Ordinal)))
+                passThrough[name] = value;
+
+        psi.Environment.Clear();
+        foreach (var (name, value) in passThrough) psi.Environment[name] = value;
+        foreach (var (name, value) in _environment) psi.Environment[name] = value;
+        psi.Environment["HOME"] = _jail.Root;
+        psi.Environment["USERPROFILE"] = _jail.Root;
+    }
+
+    private static readonly string[] PassThroughNames =
+        ["PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TERM", "SystemRoot", "ComSpec"];
+
     private string ResolveWorkingDir(string? subdir)
     {
-        var dir = subdir is null ? _jailRoot : Path.GetFullPath(Path.Combine(_jailRoot, subdir));
-        if (!IsInsideJail(dir))
-            throw new ToolJailViolationException(
-                $"Working directory '{subdir}' resolves outside the task workspace.");
+        var dir = subdir is null ? _jail.Root : _jail.Resolve(subdir);
         if (!Directory.Exists(dir))
             throw new DirectoryNotFoundException($"Working directory '{dir}' does not exist.");
         return dir;
@@ -117,16 +158,9 @@ public sealed partial class ToolExecutor(
         if (!looksAbsolute && !hasDotDot) return;
 
         var resolved = Path.GetFullPath(looksAbsolute ? candidate : Path.Combine(workingDir, candidate));
-        if (!IsInsideJail(resolved))
+        if (!_jail.Contains(resolved))
             throw new ToolJailViolationException(
                 $"Argument '{arg}' resolves outside the task workspace ({resolved}).");
-    }
-
-    private bool IsInsideJail(string fullPath)
-    {
-        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(fullPath));
-        return normalized == _jailRoot ||
-               normalized.StartsWith(_jailRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     private string SubstituteSecrets(string arg, Dictionary<string, string> secretsUsed) =>

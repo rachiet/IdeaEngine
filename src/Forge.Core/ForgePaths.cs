@@ -35,6 +35,14 @@ public sealed class ForgePaths
     public string TaskWorkspace(string project, long taskId) =>
         Path.Combine(WorkspacesDir(project), $"task-{taskId}");
 
+    /// <summary>
+    /// A long-lived workspace for a role that works on docs rather than tasks —
+    /// the PM's requirements tree, for instance. Kept between chat turns because a
+    /// conversation is not a unit of work with a merge at the end.
+    /// </summary>
+    public string RoleWorkspace(string project, string role) =>
+        Path.Combine(WorkspacesDir(project), ValidName(role));
+
     /// <summary>Project names become directory names; refuse anything that could traverse.</summary>
     public static string ValidName(string project)
     {

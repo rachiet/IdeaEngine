@@ -67,6 +67,43 @@ Two roots. Client project data NEVER lives inside the Forge source repo.
     path is the tool executor's jail; created on claim, deleted after merge
 Jail + DB locations are M0 concerns — build the path logic in M0.
 
+### Credentials file [DECIDED] — the one deliberate exception
+`~/forge_env` (override: env `FORGE_ENV`) holds **Forge's own** credentials,
+loaded into the process environment at CLI startup. Forge authenticates with an
+OAuth token in `ANTHROPIC_AUTH_TOKEN` (`sk-ant-oat…`, sent as a bearer token);
+API keys are **not** supported — one credential path means one thing to configure
+and one failure mode to recognise. Never put `ANTHROPIC_API_KEY` in this file:
+the SDK reads that name from the environment and it silently wins over the token. This is a second hard-known path, knowingly: the data root holds
+client repos and databases and is meant to be movable and shareable, so keys must
+not ride along in that payload.
+- Two kinds of secret, never mixed: harness keys → `forge_env`; client project
+  secrets → the encrypted `vault/`, seen by agents only as `{{secret:NAME}}`.
+- The tool executor builds child-process environments from an **allowlist**
+  (PATH, TMPDIR, LANG, DOTNET_*/NUGET_*), never by inheritance, and points HOME
+  at the jail. An agent's `dotnet run` is arbitrary code execution, so inheriting
+  Forge's environment would leak every key. A key added to `forge_env` tomorrow
+  is therefore invisible to agents by default, with nothing to remember.
+
+### Agent runtime [DECIDED] (settled while building M1/M2)
+- **Recipes declare their tools and file scope.** `AgentRecipe.Tools` is the
+  allowlist the toolset enforces and the prompt renders — one list, so a role
+  cannot be told about a tool it does not have. `AgentRecipe.Scope` (a
+  `PathScope`) is how "the PM never sees code" becomes mechanical: the PM is
+  scoped to PROJECT.md, STATUS.md and docs/, and `read_file src/…` is refused by
+  the harness, not by the model's manners (Principle 6 lists file-access scopes).
+- **Chat is the same loop as task work**, seeded with the conversation instead of
+  a task packet, and ended by a `reply` tool rather than `done`. Metering, budget
+  refusal, the jail and the iteration cap therefore apply to the PM unchanged.
+- **Chat history lives in the `messages` table**, replayed into an alternating
+  conversation on every turn. The PM is as stateless as an engineer: `forge chat`
+  can be closed, reopened, or resumed from another terminal.
+- **The PM commits docs straight to trunk** from a long-lived `workspaces/pm/`
+  clone. Requirements are the PM's own artifacts and the client is their
+  reviewer via sign-off, so they do not go through the task branch/review path.
+- **Provider errors park work, never crash the process.** The provider is a
+  network boundary; a 429 or auth failure ends the instance as `crash` with the
+  workspace and progress note intact, so the resume path handles it.
+
 ## Build order (spec §12 — follow strictly, do not skip ahead)
 M0 first: SQLite schemas, MeteredLlmClient (ledger + budget refusal as a
 decorator), tool executor with working-dir jail + secret substitution,

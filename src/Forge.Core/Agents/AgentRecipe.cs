@@ -1,0 +1,131 @@
+using Forge.Core.Model;
+
+namespace Forge.Core.Agents;
+
+/// <summary>
+/// Personas are data, not classes (spec §11). An "agent" is a model choice, a
+/// system prompt, context-assembly rules, a tool allowlist and a file-access
+/// scope — nothing more. Adding a role is adding a record and a prompt file.
+/// </summary>
+public sealed record AgentRecipe
+{
+    public required AgentRole Role { get; init; }
+    public required string Model { get; init; }
+
+    /// <summary>Layer A: prompts/roles/&lt;name&gt;.md, versioned in git.</summary>
+    public required string RolePrompt { get; init; }
+
+    /// <summary>Repo-relative files loaded into every turn's system prompt, if present.</summary>
+    public IReadOnlyList<string> AlwaysInContext { get; init; } = [];
+
+    /// <summary>Which tools exist for this role. Anything else is refused by the toolset.</summary>
+    public required IReadOnlyList<string> Tools { get; init; }
+
+    /// <summary>
+    /// What this role may read and write inside its workspace. Required, not
+    /// defaulted: an unrestricted scope is a real decision, and defaulting to it
+    /// would hand whole-workspace access to any role someone forgets to think about.
+    /// </summary>
+    public required PathScope Scope { get; init; }
+
+    /// <summary>Binaries the run() tool may execute. Everything else is refused.</summary>
+    public IReadOnlyList<string> ToolAllowlist { get; init; } = [];
+
+    public int DefaultBudget { get; init; } = 60_000;
+
+    /// <summary>Spec §4.3: max loop turns per instance, v1 default 40.</summary>
+    public int IterationCap { get; init; } = 40;
+
+    public int MaxTokens { get; init; } = 8_192;
+
+    /// <summary>Prefix for agent_instances ids ('eng-20260718-093012').</summary>
+    public required string InstancePrefix { get; init; }
+
+    // Every recipe below states the same fields in the same order, so two roles can
+    // be diffed by eye. Where a value equals the default it is still written out —
+    // "this role has no shell access" is worth reading, and an empty allowlist that
+    // appears by omission cannot be told apart from one nobody considered.
+
+    /// <summary>
+    /// Cheap/fast coding tier per spec §3. CONVENTIONS.md plus the task packet is
+    /// the whole standing context — engineers never see the requirements doc.
+    /// Unrestricted inside the workspace: an engineer's job is the code.
+    /// </summary>
+    public static AgentRecipe Engineer => (new AgentRecipe
+    {
+        Role = AgentRole.Engineer,
+        Model = "claude-sonnet-5",
+        RolePrompt = "engineer",
+        InstancePrefix = "eng",
+        AlwaysInContext = ["CONVENTIONS.md"],
+        Tools = ["read_file", "list_dir", "grep", "write_file", "run", "progress_note", "done", "escalate"],
+        Scope = PathScope.Workspace,
+        ToolAllowlist = ["dotnet", "git"],
+        DefaultBudget = 60_000,
+        IterationCap = 40,
+    }).Validate();
+
+    /// <summary>
+    /// High-reasoning tier per spec §3. The client's only contact. Owns requirement
+    /// fidelity, so it authors the requirements tree and STATUS.md — and is scoped
+    /// away from code, because a PM that reads src/ starts making technical calls
+    /// that belong to the Principal. No run(): it has nothing to execute.
+    /// </summary>
+    public static AgentRecipe Pm => (new AgentRecipe
+    {
+        Role = AgentRole.Pm,
+        Model = "claude-opus-4-8",
+        RolePrompt = "pm",
+        InstancePrefix = "pm",
+        AlwaysInContext = ["PROJECT.md", "STATUS.md", "docs/requirements/INDEX.md"],
+        Tools = ["read_file", "list_dir", "grep", "write_file", "add_milestone", "reply", "escalate"],
+        Scope = new PathScope(["PROJECT.md", "STATUS.md", "docs/"]),
+        ToolAllowlist = [],
+        DefaultBudget = 120_000,
+        IterationCap = 20,
+    }).Validate();
+
+    /// <summary>
+    /// Roles arrive with the milestone that gives them work (spec §12): Principal
+    /// in M3, QA in M5, Researcher once its trigger is settled (§13). Standing all
+    /// of them up early is the anti-pattern §12 closes on — a team you cannot feed
+    /// is theatre — so an unbuilt role fails loudly here rather than half-working.
+    /// </summary>
+    public static AgentRecipe For(AgentRole role) => role switch
+    {
+        AgentRole.Engineer => Engineer,
+        AgentRole.Pm => Pm,
+        _ => throw new NotSupportedException(
+            $"No recipe for {role} yet — roles are introduced one milestone at a time (spec §12)."),
+    };
+
+    /// <summary>
+    /// Recipes are data, so their mistakes are typos rather than compile errors.
+    /// Called by the factories below and again by the agent loop, because `with`
+    /// produces a new recipe without going near a factory — validating at the
+    /// point of use is what makes the check unavoidable.
+    /// </summary>
+    public AgentRecipe Validate()
+    {
+        var recipe = this;
+        if (recipe.Tools.Count == 0)
+            throw new ArgumentException($"{recipe.Role} has no tools and could never act.");
+
+        if (recipe.Tools.FirstOrDefault(t => !AgentToolset.Catalogue.ContainsKey(t)) is { } unknown)
+            throw new ArgumentException(
+                $"{recipe.Role} lists tool '{unknown}', which the toolset does not implement.");
+
+        // The allowlist only means something alongside run(); an allowlist without
+        // it, or run() without one, is a half-made decision.
+        var canRun = recipe.Tools.Contains("run");
+        if (canRun && recipe.ToolAllowlist.Count == 0)
+            throw new ArgumentException($"{recipe.Role} has run() but no binaries allowed.");
+        if (!canRun && recipe.ToolAllowlist.Count > 0)
+            throw new ArgumentException($"{recipe.Role} allows binaries but has no run() to use them.");
+
+        if (recipe.DefaultBudget <= 0 || recipe.IterationCap <= 0 || recipe.MaxTokens <= 0)
+            throw new ArgumentException($"{recipe.Role} has a non-positive budget, cap or max_tokens.");
+
+        return recipe;
+    }
+}

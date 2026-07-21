@@ -296,9 +296,9 @@ Deadlock rule (unchanged from role design): PM (requirements fidelity) vs Princi
 - **Runtime:** .NET 8+ console host; `System.CommandLine` (or Spectre.Console) for CLI; single-process, single worker loop for v1.
 - **DB:** `Microsoft.Data.Sqlite` + Dapper (schema is small; avoid EF ceremony). One `.db` file per project + one global.
 - **LLM gateway:** one interface `ILlmClient { Task<LlmResponse> CompleteAsync(LlmRequest r, CancellationToken ct) }` with per-provider adapters (Anthropic first). ALL calls go through one `MeteredLlmClient` decorator that writes the token ledger and enforces budgets by refusing calls — the supervisor is a decorator, not a convention.
-- **Tool execution:** `System.Diagnostics.Process` with working-directory jail to the project folder, allowlisted binaries (git, dotnet/npm/python of the generated stack, curl), output capture streamed into the agent loop as observations, timeout per command. Secret substitution happens here, after the LLM produced the command and before exec.
+- **Tool execution:** `System.Diagnostics.Process` with working-directory jail to the project folder, allowlisted binaries (git, dotnet, curl), output capture streamed into the agent loop as observations, timeout per command. Secret substitution happens here, after the LLM produced the command and before exec.
 - **Agent recipes:** config records: `{ role, model, systemPromptPath, alwaysInContext[], toolAllowlist[], defaultBudget }`. Personas are data, not classes.
-- **Generated-project stacks:** the *orchestrator* is C#, but generated projects can be any stack; CI adapters per stack (start with one, e.g. Python or Node, to limit v1 surface). **[OPEN]** pick the first supported target stack.
+- **Generated-project stacks:** **[DECIDED]** C#/.NET is the only supported target stack for v1 — same as the orchestrator. Generated projects are .NET 8+ (ASP.NET Core minimal API for services, console for CLIs, xUnit for tests). Other stacks stay possible behind the CI-adapter seam, but none are built until a real project needs one. Rationale: one toolchain (`dotnet build` / `dotnet test`) for both Forge and its output means one CI adapter, one allowlist, one set of conventions — and Forge building Forge-shaped code is the dogfood test.
 
 ---
 
@@ -319,7 +319,7 @@ Anti-pattern to avoid (learned from MetaGPT/ChatDev): standing up all personas a
 
 ## 13. Open Items
 
-- **[OPEN]** First supported target stack for generated projects (recommend: one of Python/FastAPI or Node/Express — mature CLI test tooling).
+- ~~**[OPEN]** First supported target stack for generated projects.~~ **[DECIDED]** C#/.NET 8+ — see §11. One toolchain for orchestrator and output; other stacks deferred behind the CI-adapter seam.
 - **[OPEN]** Exact model assignments per role tier (pin at implementation time; they change monthly). Principle is fixed: highest reasoning = Principal/QA/PM/Researcher; cheap coding tier = Engineer.
 - **[OPEN]** Property-based testing: include in v1 acceptance layer or defer.
 - **[OPEN]** Researcher role triggering: on-demand by Principal during design (likely), or also available to PM during intake.

@@ -1,0 +1,140 @@
+using Forge.Core.Model;
+
+namespace Forge.Core.Workspaces;
+
+/// <summary>
+/// Owns the per-task working clone: the directory that is also the tool
+/// executor's jail. Created on claim, reused on resume, deleted after merge
+/// (CLAUDE.md, directory layout [DECIDED]).
+/// </summary>
+public sealed class WorkspaceManager(ForgePaths paths, string project)
+{
+    public const string TrunkBranch = "master";
+
+    public string BareRepo => paths.ProjectBareRepo(project);
+
+    public string Path(long taskId) => paths.TaskWorkspace(project, taskId);
+
+    public bool Exists(long taskId) => Directory.Exists(Path(taskId));
+
+    /// <summary>Branch per task (spec §8): task/&lt;id&gt;-&lt;slug&gt;.</summary>
+    public static string BranchName(TaskRecord task) => $"task/{task.Id}-{Slug(task.Title)}";
+
+    /// <summary>
+    /// Bring the workspace to a state the agent can work in, whether this is a
+    /// first claim or a resume after a kill. Resume is not a special case here:
+    /// an existing clone is simply reused, which is what makes crash recovery and
+    /// context-bloat recovery the same mechanism.
+    /// </summary>
+    public string Prepare(TaskRecord task, string branch)
+    {
+        var dir = Path(task.Id);
+        if (Directory.Exists(System.IO.Path.Combine(dir, ".git")))
+        {
+            Git.Require(dir, "checkout", branch);
+            return dir;
+        }
+
+        Directory.CreateDirectory(paths.WorkspacesDir(project));
+        if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+
+        Git.Require(paths.ProjectDir(project), "clone", BareRepo, dir);
+
+        // A branch already on the remote means an earlier instance got as far as
+        // pushing before it died; track it rather than forking a second one.
+        if (Git.Run(dir, "rev-parse", "--verify", $"origin/{branch}").Ok)
+            Git.Require(dir, "checkout", branch);
+        else
+            Git.Require(dir, "checkout", "-b", branch);
+        return dir;
+    }
+
+    /// <summary>
+    /// A long-lived clone sitting on trunk, for a role that edits documents rather
+    /// than working tasks. Reused across turns and pulled up to date each time, so
+    /// a conversation spanning days doesn't drift from what the team has merged.
+    /// </summary>
+    public string PrepareTrunkClone(string dir)
+    {
+        if (Directory.Exists(System.IO.Path.Combine(dir, ".git")))
+        {
+            Git.Require(dir, "checkout", TrunkBranch);
+            Git.Require(dir, "pull", "--ff-only", "origin", TrunkBranch);
+            return dir;
+        }
+
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(dir)!);
+        if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        Git.Require(paths.ProjectDir(project), "clone", BareRepo, dir);
+        Git.Require(dir, "checkout", TrunkBranch);
+        return dir;
+    }
+
+    /// <summary>Commit whatever a doc-writing role changed and publish it. False when nothing changed.</summary>
+    public bool CommitAndPushTrunk(string dir, string message)
+    {
+        if (Git.Require(dir, "status", "--porcelain").Stdout.Trim().Length == 0) return false;
+        Git.Require(dir, "add", "-A");
+        Git.Require(dir, "commit", "-m", message);
+        Git.Require(dir, "push", "origin", TrunkBranch);
+        return true;
+    }
+
+    /// <summary>Real state from git, never from the agent: did anything actually change?</summary>
+    public bool HasUncommittedChanges(long taskId) =>
+        Git.Require(Path(taskId), "status", "--porcelain").Stdout.Trim().Length > 0;
+
+    public bool HasCommitsAhead(long taskId, string branch)
+    {
+        var result = Git.Run(Path(taskId), "rev-list", "--count", $"origin/{TrunkBranch}..{branch}");
+        return result.Ok && long.TryParse(result.Output, out var count) && count > 0;
+    }
+
+    /// <summary>
+    /// The harness commits, not the agent: the commit is the harness's record of
+    /// what the workspace contains, so it cannot be shaped by a model that would
+    /// rather its diff looked different.
+    /// </summary>
+    public bool CommitAll(long taskId, string message)
+    {
+        var dir = Path(taskId);
+        if (!HasUncommittedChanges(taskId)) return false;
+        Git.Require(dir, "add", "-A");
+        Git.Require(dir, "commit", "-m", message);
+        return true;
+    }
+
+    public void PushBranch(long taskId, string branch) =>
+        Git.Require(Path(taskId), "push", "-u", "origin", branch);
+
+    /// <summary>
+    /// Merge the task branch into trunk and publish it. Performed in the working
+    /// clone and pushed, because the source of truth is a bare repo with no
+    /// worktree to merge in. Returns the trunk commit sha.
+    /// </summary>
+    public string MergeToTrunk(long taskId, string branch, string message)
+    {
+        var dir = Path(taskId);
+        Git.Require(dir, "fetch", "origin");
+        Git.Require(dir, "checkout", TrunkBranch);
+        Git.Require(dir, "merge", "--no-ff", "-m", message, branch);
+        Git.Require(dir, "push", "origin", TrunkBranch);
+        return Git.Require(dir, "rev-parse", "HEAD").Output;
+    }
+
+    /// <summary>Deleted only after the work is safely in the bare repo.</summary>
+    public void Discard(long taskId)
+    {
+        var dir = Path(taskId);
+        if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+    }
+
+    private static string Slug(string title)
+    {
+        var slug = new string(title.ToLowerInvariant()
+            .Select(c => char.IsAsciiLetterOrDigit(c) ? c : '-').ToArray());
+        while (slug.Contains("--")) slug = slug.Replace("--", "-");
+        slug = slug.Trim('-');
+        return slug.Length <= 40 ? slug : slug[..40].TrimEnd('-');
+    }
+}
