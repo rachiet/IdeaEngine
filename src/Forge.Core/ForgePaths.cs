@@ -1,0 +1,49 @@
+namespace Forge.Core;
+
+/// <summary>
+/// The single source of path truth. `ForgeDataRoot` (env FORGE_HOME, default
+/// ~/forge-data) is the only path the code hard-knows; everything else is derived.
+/// Client project data never lives inside the Forge source repo.
+/// </summary>
+public sealed class ForgePaths
+{
+    public const string EnvVar = "FORGE_HOME";
+
+    public string DataRoot { get; }
+
+    public ForgePaths(string dataRoot)
+    {
+        if (string.IsNullOrWhiteSpace(dataRoot))
+            throw new ArgumentException("Data root must be a non-empty path.", nameof(dataRoot));
+        DataRoot = Path.GetFullPath(dataRoot);
+    }
+
+    public static ForgePaths Resolve() =>
+        new(Environment.GetEnvironmentVariable(EnvVar)
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "forge-data"));
+
+    public string GlobalDb => Path.Combine(DataRoot, "forge.db");
+    public string VaultDir => Path.Combine(DataRoot, "vault");
+    public string ProjectsDir => Path.Combine(DataRoot, "projects");
+
+    public string ProjectDir(string project) => Path.Combine(ProjectsDir, ValidName(project));
+    public string ProjectDb(string project) => Path.Combine(ProjectDir(project), "project.db");
+    public string ProjectBareRepo(string project) => Path.Combine(ProjectDir(project), "repo.git");
+    public string WorkspacesDir(string project) => Path.Combine(ProjectDir(project), "workspaces");
+
+    /// <summary>The tool executor's jail for one task. Created on claim, deleted after merge.</summary>
+    public string TaskWorkspace(string project, long taskId) =>
+        Path.Combine(WorkspacesDir(project), $"task-{taskId}");
+
+    /// <summary>Project names become directory names; refuse anything that could traverse.</summary>
+    public static string ValidName(string project)
+    {
+        if (string.IsNullOrWhiteSpace(project) ||
+            project.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_')))
+        {
+            throw new ArgumentException(
+                $"Invalid project name '{project}': use letters, digits, '-' or '_'.", nameof(project));
+        }
+        return project;
+    }
+}

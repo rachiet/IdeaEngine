@@ -1,0 +1,101 @@
+using System.Data;
+using Forge.Core.Db;
+using Forge.Core.Model;
+using TaskStatus = Forge.Core.Model.TaskStatus;
+
+namespace Forge.Core.Llm;
+
+/// <summary>
+/// The supervisor as a decorator, not a convention (spec §11). Wraps any
+/// provider adapter and:
+///  - refuses the call outright once the task (or project) budget is spent —
+///    task → blocked, escalation queued to the PM, exception thrown;
+///  - writes a token_ledger row and bumps tasks.tokens_spent after every call;
+///  - injects a system_nudge message when a call crosses 70% of the task budget.
+/// </summary>
+public sealed class MeteredLlmClient(
+    ILlmClient inner,
+    IDbConnection projectConn,
+    ModelPricing pricing,
+    long? projectTokenBudget = null) : ILlmClient
+{
+    private const double NudgeThreshold = 0.70;
+
+    private readonly TaskRepository _tasks = new(projectConn);
+    private readonly MessageRepository _messages = new(projectConn);
+    private readonly LedgerRepository _ledger = new(projectConn);
+
+    public async Task<LlmResponse> CompleteAsync(LlmRequest request, CancellationToken ct = default)
+    {
+        RefuseIfExhausted(request.Attribution);
+
+        var response = await inner.CompleteAsync(request, ct).ConfigureAwait(false);
+
+        Record(request, response.Usage);
+        return response;
+    }
+
+    private void RefuseIfExhausted(LlmAttribution attribution)
+    {
+        if (projectTokenBudget is { } projectBudget)
+        {
+            var totals = _ledger.ProjectTotals();
+            var projectSpent = totals.TokensIn + totals.TokensOut;
+            if (projectSpent >= projectBudget)
+            {
+                QueueBudgetEscalation(attribution, "Project", projectSpent, projectBudget);
+                throw new BudgetExhaustedException("Project", projectSpent, projectBudget);
+            }
+        }
+
+        if (attribution.TaskId is not { } taskId) return;
+
+        var task = _tasks.Get(taskId);
+        if (task.TokensSpent < task.TokenBudget) return;
+
+        if (TaskTransitions.IsLegal(task.Status, TaskStatus.Blocked))
+            _tasks.Transition(taskId, TaskStatus.Blocked);
+        QueueBudgetEscalation(attribution, $"Task {taskId}", task.TokensSpent, task.TokenBudget);
+        throw new BudgetExhaustedException($"Task {taskId}", task.TokensSpent, task.TokenBudget);
+    }
+
+    private void QueueBudgetEscalation(LlmAttribution attribution, string scope, long spent, long budget) =>
+        _messages.Insert(Message.Create(
+            MessageType.Escalation, "system", "pm",
+            $"{scope} budget exhausted ({spent}/{budget} tokens); LLM call by " +
+            $"{attribution.AgentInstanceId} refused" +
+            (attribution.TaskId is { } t ? $"; task {t} blocked." : "."),
+            attribution.TaskId));
+
+    private void Record(LlmRequest request, LlmUsage usage)
+    {
+        var attribution = request.Attribution;
+        _ledger.Append(new TokenLedgerEntry
+        {
+            AgentInstanceId = attribution.AgentInstanceId,
+            Role = attribution.Role,
+            TaskId = attribution.TaskId,
+            Model = request.Model,
+            TokensIn = usage.TokensIn,
+            TokensOut = usage.TokensOut,
+            CostUsd = pricing.CostUsd(request.Model, usage),
+        });
+
+        if (attribution.TaskId is not { } taskId) return;
+
+        var before = _tasks.Get(taskId);
+        _tasks.AddTokensSpent(taskId, usage.TokensIn + usage.TokensOut);
+        var after = before.TokensSpent + usage.TokensIn + usage.TokensOut;
+
+        var threshold = before.TokenBudget * NudgeThreshold;
+        if (before.TokensSpent < threshold && after >= threshold)
+        {
+            _messages.Insert(Message.Create(
+                MessageType.SystemNudge, "system",
+                SnakeCaseEnum.ToSnakeCase(attribution.Role),
+                $"Task {taskId} has used {after} of {before.TokenBudget} budgeted tokens (≥70%). " +
+                "Wrap up now, or write a progress note and escalate.",
+                taskId));
+        }
+    }
+}

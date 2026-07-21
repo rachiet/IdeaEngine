@@ -1,0 +1,55 @@
+namespace Forge.Core.Model;
+
+// These enums mirror the CHECK constraints in Db/Schema.cs — keep both layers in sync.
+
+public enum TaskType { Feature, Bug, Design, ImpactAnalysis, Research, Chore }
+
+public enum TaskStatus
+{
+    Created, Ready, Claimed, InProgress, InReview, Merging,
+    Qa, Done, Blocked, Cancelled
+}
+
+public enum AgentRole { Pm, Principal, Engineer, Qa, Researcher }
+
+public enum MessageType
+{
+    Question, Answer, Review, Decision, Escalation, Status, ChangeRequest, SystemNudge
+}
+
+public enum MessageStatus { Pending, InProgress, Done }
+
+public enum MilestoneStatus { Planned, Active, DemoReady, Accepted }
+
+public enum EndReason { Done, Budget, Iterations, Crash, Escalated }
+
+/// <summary>PascalCase enum member ⇄ snake_case TEXT, as stored under the CHECK constraints.</summary>
+public static class SnakeCaseEnum
+{
+    public static string ToSnakeCase<T>(T value) where T : struct, Enum
+    {
+        var name = value.ToString();
+        var sb = new System.Text.StringBuilder(name.Length + 4);
+        for (var i = 0; i < name.Length; i++)
+        {
+            if (char.IsUpper(name[i]))
+            {
+                if (i > 0) sb.Append('_');
+                sb.Append(char.ToLowerInvariant(name[i]));
+            }
+            else sb.Append(name[i]);
+        }
+        return sb.ToString();
+    }
+
+    public static T Parse<T>(string text) where T : struct, Enum
+    {
+        var candidate = text.Replace("_", "");
+        if (Enum.TryParse<T>(candidate, ignoreCase: true, out var value) &&
+            ToSnakeCase(value) == text)
+        {
+            return value;
+        }
+        throw new FormatException($"'{text}' is not a valid {typeof(T).Name}.");
+    }
+}
