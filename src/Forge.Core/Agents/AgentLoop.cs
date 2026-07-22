@@ -2,6 +2,7 @@ using System.Data;
 using System.Text;
 using Forge.Core.Db;
 using Forge.Core.Llm;
+using Forge.Core.Logging;
 using Forge.Core.Model;
 using Forge.Core.Tools;
 
@@ -29,7 +30,8 @@ public sealed class AgentLoop(
     ILlmClient llm,
     IDbConnection conn,
     PromptAssembler assembler,
-    AgentRecipe recipe)
+    AgentRecipe recipe,
+    ForgeLogger? logger = null)
 {
     /// <summary>Turns with no tool call are dead weight; three in a row means the model is lost.</summary>
     private const int MaxEmptyTurns = 3;
@@ -40,6 +42,7 @@ public sealed class AgentLoop(
     private readonly TaskRepository _tasks = new(conn);
     private readonly MessageRepository _messages = new(conn);
     private readonly AgentInstanceRepository _instances = new(conn);
+    private readonly ForgeLogger _baseLog = logger ?? ForgeLogger.Null;
 
     /// <summary>Work a task: the packet is the opening turn.</summary>
     public Task<AgentRunResult> RunAsync(
@@ -61,10 +64,16 @@ public sealed class AgentLoop(
         TaskRecord? task,
         CancellationToken ct)
     {
+        // Task-scoped when working a task, project-scoped for a chat turn — so
+        // every line this run emits carries the right correlation automatically.
+        var log = task is { } scoped ? _baseLog.For(scoped.Id) : _baseLog;
+
         var instanceId = _instances.NewId(_recipe.InstancePrefix);
         _instances.Start(instanceId, _recipe.Role, _recipe.Model, task?.Id);
+        log.Event(EventType.InstanceStart,
+            $"{instanceId} ({SnakeCaseEnum.ToSnakeCase(_recipe.Role)}, {_recipe.Model})");
 
-        var toolset = new AgentToolset(executor, conn, _recipe, task);
+        var toolset = new AgentToolset(executor, conn, _recipe, task, log);
         var attribution = new LlmAttribution(instanceId, _recipe.Role, task?.Id);
 
         List<LlmMessage> conversation = [.. seed];
@@ -94,7 +103,8 @@ public sealed class AgentLoop(
             {
                 // The supervisor already blocked the task and told the PM. The loop's
                 // only job is to stop — budgets are enforced by not making the call.
-                return Finish(instanceId, EndReason.Budget, iterations, toolset, task, ex.Message);
+                log.Event(EventType.LlmRefused, ex.Message);
+                return Finish(instanceId, EndReason.Budget, iterations, toolset, task, log, ex.Message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -102,9 +112,14 @@ public sealed class AgentLoop(
                 // outages are expected operating conditions, not bugs. Park the work
                 // with its workspace and note intact so it can be resumed once the
                 // condition clears — never lose work to someone else's 429.
-                return Finish(instanceId, EndReason.Crash, iterations, toolset, task,
+                log.Event(EventType.ErrorProvider, $"turn {turn}: {ex.Message}");
+                return Finish(instanceId, EndReason.Crash, iterations, toolset, task, log,
                     $"LLM call failed on turn {turn}: {ex.Message}");
             }
+
+            log.Event(EventType.LlmCall,
+                $"turn {turn}: {response.Usage.TokensIn + response.Usage.TokensOut} tokens " +
+                $"(in {response.Usage.TokensIn} / out {response.Usage.TokensOut})");
 
             conversation.Add(new LlmMessage("assistant", response.Content));
 
@@ -113,7 +128,7 @@ public sealed class AgentLoop(
             {
                 if (++emptyTurns >= MaxEmptyTurns)
                 {
-                    return Finish(instanceId, EndReason.Crash, iterations, toolset, task,
+                    return Finish(instanceId, EndReason.Crash, iterations, toolset, task, log,
                         $"No tool call in {MaxEmptyTurns} consecutive turns; the model is not acting.");
                 }
                 conversation.Add(new LlmMessage("user",
@@ -136,13 +151,13 @@ public sealed class AgentLoop(
             }
 
             if (end is { } finalReason)
-                return Finish(instanceId, finalReason, iterations, toolset, task, observations.ToString().Trim());
+                return Finish(instanceId, finalReason, iterations, toolset, task, log, observations.ToString().Trim());
 
-            AppendPendingMessages(task?.Id, observations);
+            AppendPendingMessages(task?.Id, observations, log);
             conversation.Add(new LlmMessage("user", observations.ToString().TrimEnd()));
         }
 
-        return Finish(instanceId, EndReason.Iterations, iterations, toolset, task,
+        return Finish(instanceId, EndReason.Iterations, iterations, toolset, task, log,
             $"Iteration cap of {_recipe.IterationCap} turns reached.");
     }
 
@@ -150,7 +165,7 @@ public sealed class AgentLoop(
     /// Deliver anything the harness queued for this role mid-loop — most importantly
     /// the supervisor's 70% budget nudge, which is useless if it only lands in a table.
     /// </summary>
-    private void AppendPendingMessages(long? taskId, StringBuilder observations)
+    private void AppendPendingMessages(long? taskId, StringBuilder observations, ForgeLogger log)
     {
         foreach (var message in _messages.Pending(SnakeCaseEnum.ToSnakeCase(_recipe.Role)))
         {
@@ -160,6 +175,8 @@ public sealed class AgentLoop(
                 .AppendLine(message.Payload)
                 .AppendLine();
             _messages.SetStatus(message.Id, MessageStatus.Done);
+            if (message.Type == MessageType.SystemNudge)
+                log.Event(EventType.LlmNudge, message.Payload);
         }
     }
 
@@ -170,7 +187,7 @@ public sealed class AgentLoop(
     /// </summary>
     private AgentRunResult Finish(
         string instanceId, EndReason end, int iterations,
-        AgentToolset toolset, TaskRecord? task, string? detail)
+        AgentToolset toolset, TaskRecord? task, ForgeLogger log, string? detail)
     {
         var note = toolset.LastProgressNote;
         if (note is null && task is not null)
@@ -181,6 +198,8 @@ public sealed class AgentLoop(
         }
 
         _instances.End(instanceId, end);
+        log.Event(EventType.InstanceEnd,
+            $"{instanceId} ended: {SnakeCaseEnum.ToSnakeCase(end)} after {iterations} turns");
         return new AgentRunResult(instanceId, end, iterations, note, detail, toolset.LastReply);
     }
 }

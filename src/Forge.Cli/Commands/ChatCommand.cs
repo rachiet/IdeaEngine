@@ -4,6 +4,7 @@ using Forge.Core.Agents;
 using Forge.Core.Chat;
 using Forge.Core.Db;
 using Forge.Core.Llm;
+using Forge.Core.Logging;
 using Forge.Core.Secrets;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -48,10 +49,12 @@ public sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         }
 
         using var conn = Database.OpenProject(dbPath);
+        using var sink = new FileLogSink(paths.ProjectLog(settings.Project));
         var chat = new PmChat(
             paths, settings.Project, conn,
             new MeteredLlmClient(new AnthropicLlmClient(), conn, ModelPricing.Default, settings.ProjectBudget),
-            new SecretsVault(paths.VaultDir), PromptLibrary.Resolve());
+            new SecretsVault(paths.VaultDir), PromptLibrary.Resolve(),
+            new ForgeLogger(sink, settings.Project));
 
         PrintHistory(chat);
         if (settings.HistoryOnly) return 0;

@@ -49,10 +49,10 @@ public class TaskRunnerTests : IDisposable
             TaskStatus.Ready);
 
     /// <summary>Metered, as in production — an agent never sees an undecorated client.</summary>
-    private TaskRunner Runner(ILlmClient llm) => new(
+    private TaskRunner Runner(ILlmClient llm, Forge.Core.Logging.ForgeLogger? logger = null) => new(
         _paths, Project, _conn,
         new MeteredLlmClient(llm, _conn, ModelPricing.Default),
-        new SecretsVault(_paths.VaultDir), PromptLibrary.Resolve());
+        new SecretsVault(_paths.VaultDir), PromptLibrary.Resolve(), logger);
 
     /// <summary>Read a file out of the bare repo — the source of truth, not the workspace.</summary>
     private string ShowFromTrunk(string path) =>
@@ -63,6 +63,39 @@ public class TaskRunnerTests : IDisposable
     {
         Assert.Contains("# demo", ShowFromTrunk("PROJECT.md"));
         Assert.True(Directory.Exists(_paths.WorkspacesDir(Project)));
+    }
+
+    [Fact]
+    public async Task A_task_run_emits_a_correlated_stream_queryable_at_project_and_task_scope()
+    {
+        var sink = new MemoryLogSink();
+        var logger = new Forge.Core.Logging.ForgeLogger(sink, Project);
+
+        var task = ReadyTask();
+        var llm = new ScriptedLlmClient(
+            ScriptedLlmClient.Tool("write_file", ("path", "greeting.txt"), ("content", "hello")),
+            ScriptedLlmClient.Tool("done", ("summary", "Created greeting.txt.")));
+
+        await Runner(llm, logger).RunAsync(_tasks.Get(task.Id));
+
+        // The whole story is present, in order: claim → workspace → instance →
+        // the model's calls and tool actions → merge → done.
+        Assert.Contains("lifecycle.task_transition", sink.Types);   // claimed / in_progress / …
+        Assert.Contains("lifecycle.instance_start", sink.Types);
+        Assert.Contains("llm.call", sink.Types);
+        Assert.Contains("tool.write_file", sink.Types);
+        Assert.Contains("git.merge", sink.Types);
+        Assert.Contains("lifecycle.instance_end", sink.Types);
+
+        // The file-creation line reads like the client's own example.
+        Assert.Contains(sink.Entries, e =>
+            e.Type == Forge.Core.Logging.EventType.ToolWriteFile && e.Message.Contains("greeting.txt"));
+
+        // Correlation: every one of these lines is scoped to this task, so a
+        // task-level query returns them and a project-level query is a superset.
+        Assert.NotEmpty(sink.ForTask(task.Id));
+        Assert.All(sink.ForTask(task.Id), e => Assert.Equal(Project, e.Project));
+        Assert.All(sink.Entries, e => Assert.Equal(task.Id, e.Task));  // all task-scoped in this run
     }
 
     [Fact]

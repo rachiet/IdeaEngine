@@ -1,0 +1,138 @@
+namespace Forge.Core.Logging;
+
+/// <summary>
+/// The closed vocabulary of loggable events, rendered as <c>domain.action</c> on
+/// the wire (e.g. <c>tool.write_file</c>, <c>git.merge</c>). An enum, not free
+/// strings, so a call site cannot invent <c>tool.writefile</c> or <c>git.merged</c>
+/// and quietly fragment the log — every event that can be recorded is listed here,
+/// and prefix filters (<c>eventType LIKE 'tool.%'</c>) stay reliable.
+/// </summary>
+public enum EventType
+{
+    // lifecycle — the skeleton of a task's life
+    TaskCreated,
+    TaskTransition,
+    InstanceStart,
+    InstanceEnd,
+
+    // llm — every model interaction the supervisor mediates
+    LlmCall,
+    LlmNudge,
+    LlmRefused,
+    LlmError,
+
+    // tool — what an agent actually did, one per tool
+    ToolListDir,
+    ToolReadFile,
+    ToolGrep,
+    ToolWriteFile,
+    ToolRun,
+    ToolAddMilestone,
+    ToolReply,
+    ToolProgressNote,
+    ToolDone,
+    ToolEscalate,
+    ToolRefused,
+
+    // git — harness-side repository truth
+    GitBranch,
+    GitCommit,
+    GitMerge,
+    GitPush,
+
+    // message — the free-form, human-readable channel: agent↔client communication
+    // AND ordinary service/debug lines the code emits ("creating util file X").
+    // The one eventType you read rather than skip; single-token, not domain.action,
+    // because it is a general log line, not a typed mechanical event.
+    Message,
+
+    // error — failures worth a line of their own
+    ErrorProvider,
+    ErrorInternal,
+}
+
+/// <summary>Wire rendering for <see cref="EventType"/>, and back again.</summary>
+public static class EventTypes
+{
+    private static readonly IReadOnlyDictionary<EventType, string> ToWire =
+        new Dictionary<EventType, string>
+        {
+            [EventType.TaskCreated] = "lifecycle.task_created",
+            [EventType.TaskTransition] = "lifecycle.task_transition",
+            [EventType.InstanceStart] = "lifecycle.instance_start",
+            [EventType.InstanceEnd] = "lifecycle.instance_end",
+            [EventType.LlmCall] = "llm.call",
+            [EventType.LlmNudge] = "llm.nudge",
+            [EventType.LlmRefused] = "llm.refused",
+            [EventType.LlmError] = "llm.error",
+            [EventType.ToolListDir] = "tool.list_dir",
+            [EventType.ToolReadFile] = "tool.read_file",
+            [EventType.ToolGrep] = "tool.grep",
+            [EventType.ToolWriteFile] = "tool.write_file",
+            [EventType.ToolRun] = "tool.run",
+            [EventType.ToolAddMilestone] = "tool.add_milestone",
+            [EventType.ToolReply] = "tool.reply",
+            [EventType.ToolProgressNote] = "tool.progress_note",
+            [EventType.ToolDone] = "tool.done",
+            [EventType.ToolEscalate] = "tool.escalate",
+            [EventType.ToolRefused] = "tool.refused",
+            [EventType.GitBranch] = "git.branch",
+            [EventType.GitCommit] = "git.commit",
+            [EventType.GitMerge] = "git.merge",
+            [EventType.GitPush] = "git.push",
+            [EventType.Message] = "message",
+            [EventType.ErrorProvider] = "error.provider",
+            [EventType.ErrorInternal] = "error.internal",
+        };
+
+    private static readonly IReadOnlyDictionary<string, EventType> FromWire =
+        ToWire.ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.Ordinal);
+
+    public static string Wire(this EventType type) =>
+        ToWire.TryGetValue(type, out var wire)
+            ? wire
+            : throw new ArgumentOutOfRangeException(nameof(type), type, "No wire form — add it to EventTypes.");
+
+    public static EventType Parse(string wire) =>
+        FromWire.TryGetValue(wire, out var type)
+            ? type
+            : throw new FormatException($"'{wire}' is not a known eventType.");
+
+    /// <summary>The domain column — the part before the dot (`tool`, `git`), or the
+    /// whole token for the single-level `message` channel.</summary>
+    public static string Domain(this EventType type)
+    {
+        var wire = type.Wire();
+        var dot = wire.IndexOf('.');
+        return dot < 0 ? wire : wire[..dot];
+    }
+
+    /// <summary>The action column — the part after the dot (`write_file`, `merge`),
+    /// or empty for `message`, which has no action.</summary>
+    public static string Action(this EventType type)
+    {
+        var wire = type.Wire();
+        var dot = wire.IndexOf('.');
+        return dot < 0 ? "" : wire[(dot + 1)..];
+    }
+
+    /// <summary>Reassemble the enum from its two stored columns — the read-back side of the split.</summary>
+    public static EventType FromColumns(string domain, string action) =>
+        Parse(action.Length == 0 ? domain : $"{domain}.{action}");
+
+    /// <summary>The tool a call named ⇒ its event, so the toolset logs consistently.</summary>
+    public static EventType? ForTool(string toolName) => toolName switch
+    {
+        "list_dir" => EventType.ToolListDir,
+        "read_file" => EventType.ToolReadFile,
+        "grep" => EventType.ToolGrep,
+        "write_file" => EventType.ToolWriteFile,
+        "run" => EventType.ToolRun,
+        "add_milestone" => EventType.ToolAddMilestone,
+        "reply" => EventType.ToolReply,
+        "progress_note" => EventType.ToolProgressNote,
+        "done" => EventType.ToolDone,
+        "escalate" => EventType.ToolEscalate,
+        _ => null,
+    };
+}

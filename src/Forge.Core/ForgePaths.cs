@@ -29,6 +29,9 @@ public sealed class ForgePaths
     public string ProjectDir(string project) => Path.Combine(ProjectsDir, ValidName(project));
     public string ProjectDb(string project) => Path.Combine(ProjectDir(project), "project.db");
     public string ProjectBareRepo(string project) => Path.Combine(ProjectDir(project), "repo.git");
+
+    /// <summary>The project's log file — one story per project, the default log sink.</summary>
+    public string ProjectLog(string project) => Path.Combine(ProjectDir(project), "forge.log");
     public string WorkspacesDir(string project) => Path.Combine(ProjectDir(project), "workspaces");
 
     /// <summary>The tool executor's jail for one task. Created on claim, deleted after merge.</summary>

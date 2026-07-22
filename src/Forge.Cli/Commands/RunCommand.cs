@@ -3,6 +3,7 @@ using Forge.Core;
 using Forge.Core.Agents;
 using Forge.Core.Db;
 using Forge.Core.Llm;
+using Forge.Core.Logging;
 using Forge.Core.Model;
 using Forge.Core.Scheduling;
 using Forge.Core.Secrets;
@@ -54,9 +55,14 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         var llm = new MeteredLlmClient(
             new AnthropicLlmClient(), conn, ModelPricing.Default, settings.ProjectBudget);
 
+        // Default sink: the project's log file. Swap this line to point logs
+        // anywhere — a console sink, a composite, a remote service.
+        using var sink = new FileLogSink(paths.ProjectLog(settings.Project));
+        var logger = new ForgeLogger(sink, settings.Project);
+
         var runner = new TaskRunner(
             paths, settings.Project, conn, llm,
-            new SecretsVault(paths.VaultDir), PromptLibrary.Resolve());
+            new SecretsVault(paths.VaultDir), PromptLibrary.Resolve(), logger);
 
         if (settings.TaskId is { } id)
         {

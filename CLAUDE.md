@@ -104,6 +104,44 @@ not ride along in that payload.
   network boundary; a 429 or auth failure ends the instance as `crash` with the
   workspace and progress note intact, so the resume path handles it.
 
+### Logging / observability [DECIDED] (settled while building the event log)
+- **Six columns, fixed:** `timestamp | project | task | domain | action | message`.
+  `project` is on every line (the story); `task` is the unit within it and is
+  null for project-level events (intake chat, milestone planning). A task line
+  still names its project, so filtering by project is a superset of every task —
+  "all logs for the project" and "logs for one task" are the same rows, one
+  filter apart. There is NO single "scope" column: project and task are two
+  levels of identity, not two values of one field.
+- **`domain` + `action` are rendered from one closed `EventType` enum**
+  (`Logging/EventType.cs`), split at write time and reassembled on read with
+  `EventTypes.FromColumns`. The enum is the single source of truth, so the two
+  columns can never disagree, and filtering is an equality check (`domain='tool'`
+  to skip or find a domain; `action='write_file'` across the whole project).
+  - Typed mechanical events split as `domain`/`action`: `tool`/`write_file`,
+    `git`/`merge`, `lifecycle`/`instance_start`, `llm`/`call`, `error`/`provider`.
+  - The `message` domain has an empty `action` — free-form, human-readable,
+    covering agent↔client communication AND ordinary service/debug logging from
+    harness code ("creating util file X"). The line you actually read.
+- **The logger API is two methods** (`Logging/ForgeLogger.cs`): `Event(EventType,
+  msg)` for typed events (the enum is the only category argument, so a git merge
+  can't be mis-tagged as lifecycle — the old per-domain methods were a footgun and
+  are gone), and `Message(msg)` for the free-form channel. Tool events derive their
+  type from the tool name (`EventTypes.ForTool`) and are never hand-written.
+- Read back with `forge log <project> --events [--task N] [--domain D]`.
+- **Swappable sink behind `ILogSink`** (`Write(LogEntry)`). Default is
+  `FileLogSink` → `projects/<name>/forge.log` (per-project, so isolation is
+  structural). `ConsoleLogSink`, `CompositeLogSink` (fan-out, "push anywhere"),
+  and `NullLogSink` exist; a remote sink is a drop-in. Changing destination is
+  one line at the CLI, no call-site changes.
+- **`ForgeLogger` is the facade** every emit point calls; `.For(taskId)` binds
+  the correlation once so call sites emit a one-line message. Optional everywhere
+  (defaults to `ForgeLogger.Null`), so logging is never required to run and did
+  not disturb existing constructors/tests.
+- **Emit points:** toolset (one line per tool call, `tool.refused` on refusal),
+  loop (instance start/end, llm.call, llm.nudge, llm.refused, error.provider),
+  runner (task transitions, git branch/push/merge), PM chat (message.sent,
+  git.commit). Read back with `forge log <project> --events [--task N]`.
+
 ## Build order (spec §12 — follow strictly, do not skip ahead)
 M0 first: SQLite schemas, MeteredLlmClient (ledger + budget refusal as a
 decorator), tool executor with working-dir jail + secret substitution,

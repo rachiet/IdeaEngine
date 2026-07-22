@@ -2,6 +2,7 @@ using System.Data;
 using System.Text;
 using System.Text.RegularExpressions;
 using Forge.Core.Db;
+using Forge.Core.Logging;
 using Forge.Core.Model;
 using Forge.Core.Tools;
 
@@ -22,15 +23,18 @@ public sealed class AgentToolset(
     ToolExecutor executor,
     IDbConnection connection,
     AgentRecipe recipe,
-    TaskRecord? task = null)
+    TaskRecord? task = null,
+    ForgeLogger? logger = null)
 {
     private const int MaxObservationChars = 8_000;
     private const int DefaultReadLines = 400;
+    private const int LogSummaryChars = 200;
 
     private readonly PathJail _jail = executor.Jail;
     private readonly TaskRepository _tasks = new(connection);
     private readonly MessageRepository _messages = new(connection);
     private readonly MilestoneRepository _milestones = new(connection);
+    private readonly ForgeLogger _log = logger ?? ForgeLogger.Null;
 
     /// <summary>Last note the agent wrote, for the harness's end-of-run fallback.</summary>
     public string? LastProgressNote { get; private set; }
@@ -55,6 +59,13 @@ public sealed class AgentToolset(
         };
 
     public async Task<ToolOutcome> ExecuteAsync(ToolCall call, CancellationToken ct = default)
+    {
+        var outcome = await DispatchAsync(call, ct).ConfigureAwait(false);
+        LogOutcome(call, outcome);
+        return outcome;
+    }
+
+    private async Task<ToolOutcome> DispatchAsync(ToolCall call, CancellationToken ct)
     {
         if (!recipe.Tools.Contains(call.Name, StringComparer.Ordinal))
         {
@@ -88,6 +99,26 @@ public sealed class AgentToolset(
         catch (IOException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
         catch (UnauthorizedAccessException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
         catch (KeyNotFoundException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// One log line per tool call — the narrative of what the agent actually did.
+    /// A refused or errored call is logged as tool.refused so the log shows the
+    /// boundary being hit, not just successes.
+    /// </summary>
+    private void LogOutcome(ToolCall call, ToolOutcome outcome)
+    {
+        var summary = FirstLine(outcome.Observation);
+        var refused = summary.StartsWith("REFUSED:", StringComparison.Ordinal)
+                   || summary.StartsWith("ERROR:", StringComparison.Ordinal);
+        var type = refused ? EventType.ToolRefused : EventTypes.ForTool(call.Name);
+        if (type is { } eventType) _log.Event(eventType, summary);
+    }
+
+    private static string FirstLine(string text)
+    {
+        var line = text.ReplaceLineEndings("\n").Split('\n', 2)[0].Trim();
+        return line.Length <= LogSummaryChars ? line : line[..LogSummaryChars] + "…";
     }
 
     /// <summary>Jail first (can it be reached?), then role scope (may this role reach it?).</summary>

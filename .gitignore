@@ -57,3 +57,5 @@ vault/
 *.key
 key.bin
 secrets.json
+*.log
+forge.log

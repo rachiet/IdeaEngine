@@ -2,6 +2,7 @@ using System.Data;
 using Forge.Core.Agents;
 using Forge.Core.Db;
 using Forge.Core.Llm;
+using Forge.Core.Logging;
 using Forge.Core.Model;
 using Forge.Core.Secrets;
 using Forge.Core.Tools;
@@ -26,7 +27,8 @@ public sealed class PmChat(
     IDbConnection conn,
     ILlmClient llm,
     SecretsVault vault,
-    PromptLibrary prompts)
+    PromptLibrary prompts,
+    ForgeLogger? logger = null)
 {
     /// <summary>How much history to replay. Older turns live in the log and in the docs the PM wrote.</summary>
     private const int HistoryTurns = 40;
@@ -34,6 +36,8 @@ public sealed class PmChat(
     private readonly AgentRecipe _recipe = AgentRecipe.Pm;
     private readonly MessageRepository _messages = new(conn);
     private readonly WorkspaceManager _workspaces = new(paths, project);
+    // Intake has no task yet, so PM chat logs at project scope (task column blank).
+    private readonly ForgeLogger _log = logger ?? ForgeLogger.Null;
 
     public string WorkspacePath => paths.RoleWorkspace(project, "pm");
 
@@ -50,10 +54,11 @@ public sealed class PmChat(
             throw new ArgumentException("Say something to the PM.", nameof(clientMessage));
 
         _messages.Insert(Message.Create(MessageType.Question, "client", "pm", clientMessage));
+        _log.Message($"client → pm: {Summarise(clientMessage)}");
 
         var workspace = _workspaces.PrepareTrunkClone(WorkspacePath);
         var executor = new ToolExecutor(workspace, _recipe.ToolAllowlist, vault);
-        var loop = new AgentLoop(llm, conn, new PromptAssembler(prompts), _recipe);
+        var loop = new AgentLoop(llm, conn, new PromptAssembler(prompts), _recipe, _log);
 
         var result = await loop
             .RunChatAsync(PromptAssembler.Conversation(History()), executor, ct)
@@ -65,10 +70,12 @@ public sealed class PmChat(
         // reviewer via sign-off.
         var changed = _workspaces.CommitAndPushTrunk(
             WorkspacePath, $"docs(pm): {Summarise(clientMessage)}");
+        if (changed) _log.Event(EventType.GitCommit, "committed requirements to trunk");
 
         var reply = result.Reply ?? Fallback(result);
         if (result.Reply is null)
             _messages.Insert(Message.Create(MessageType.Status, "pm", "client", reply));
+        _log.Message($"pm → client: {Summarise(reply)}");
 
         return new ChatTurn(reply, result.End, changed, result.Detail);
     }
