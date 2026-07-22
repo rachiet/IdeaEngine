@@ -84,6 +84,24 @@ not ride along in that payload.
   Forge's environment would leak every key. A key added to `forge_env` tomorrow
   is therefore invisible to agents by default, with nothing to remember.
 
+### Design phase [DECIDED] (settled while building M3)
+- **The Principal is the same loop, seeded with a design brief** — not a chat, not
+  a board task. `Design/DesignPhase.cs` runs it on a long-lived trunk clone (like
+  the PM's doc work), commits structure/CONVENTIONS/contracts to trunk, then runs
+  the coverage gate. Highest-reasoning recipe (`AgentRecipe.Principal`, opus),
+  unrestricted workspace scope (a technical role, unlike the PM), no run().
+- **The task DAG is real rows, not prose.** `create_task` inserts board tasks
+  (born `created`), `add_dependency` writes `task_deps` edges. Both are toolset
+  tools gated to the Principal's recipe.
+- **PM coverage gate is mechanical** (`Design/CoverageGate.cs`): every
+  `docs/requirements/NN-*.md` must be named by some task's `requirements_ref`, or
+  it's reported as uncovered. Ground truth, not an LLM claim.
+- **Client sign-off gate uses status, not a new field.** Design tasks are born
+  `created` (unclaimable); `DesignPhase.Approve` flips them to `ready`. That
+  transition IS "the client accepted the design" — `forge design approve`. Until
+  then `forge run` finds no work.
+- CLI: `forge design run <project>` then `forge design approve <project>`.
+
 ### Agent runtime [DECIDED] (settled while building M1/M2)
 - **Recipes declare their tools and file scope.** `AgentRecipe.Tools` is the
   allowlist the toolset enforces and the prompt renders — one list, so a role

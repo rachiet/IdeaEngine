@@ -1,0 +1,201 @@
+using Forge.Core;
+using Forge.Core.Agents;
+using Forge.Core.Db;
+using Forge.Core.Design;
+using Forge.Core.Llm;
+using Forge.Core.Model;
+using Forge.Core.Secrets;
+using Forge.Core.Workspaces;
+using Microsoft.Data.Sqlite;
+using TaskStatus = Forge.Core.Model.TaskStatus;
+
+namespace Forge.Tests;
+
+/// <summary>
+/// M3 acceptance: the Principal reads requirements and authors structure,
+/// conventions, contracts, and a task DAG; the coverage gate catches a
+/// requirement with no task; the sign-off gate holds tasks until approval.
+///
+/// Every model turn is hardcoded — the harness around the model is under test.
+/// </summary>
+public class DesignPhaseTests : IDisposable
+{
+    private const string Project = "demo";
+
+    private readonly string _dataRoot = Path.Combine(Path.GetTempPath(), $"forge-design-{Guid.NewGuid():N}");
+    private readonly ForgePaths _paths;
+    private readonly SqliteConnection _conn;
+    private readonly TaskRepository _tasks;
+
+    public DesignPhaseTests()
+    {
+        _paths = new ForgePaths(_dataRoot);
+        ProjectBootstrap.Init(_paths, Project);
+        _conn = Database.OpenProject(_paths.ProjectDb(Project));
+        _tasks = new TaskRepository(_conn);
+    }
+
+    public void Dispose()
+    {
+        _conn.Dispose();
+        Directory.Delete(_dataRoot, recursive: true);
+    }
+
+    /// <summary>Seed requirement files into trunk, the way the PM's chat would have.</summary>
+    private void SeedRequirements(params string[] fileNames)
+    {
+        var seed = Path.Combine(_dataRoot, "seed");
+        Git.Require(_paths.ProjectDir(Project), "clone", _paths.ProjectBareRepo(Project), seed);
+        var reqDir = Path.Combine(seed, "docs", "requirements");
+        Directory.CreateDirectory(reqDir);
+        File.WriteAllText(Path.Combine(reqDir, "INDEX.md"), "# Requirements\n\nVERSION: 1\n");
+        foreach (var name in fileNames)
+            File.WriteAllText(Path.Combine(reqDir, name), $"# {name}\n\nVERSION: 1\n\nA requirement.\n");
+        Git.Require(seed, "add", "-A");
+        Git.Require(seed, "commit", "-m", "docs: requirements");
+        Git.Require(seed, "push", "origin", "master");
+        Directory.Delete(seed, recursive: true);
+    }
+
+    private DesignPhase Design(ILlmClient llm) => new(
+        _paths, Project, _conn,
+        new MeteredLlmClient(llm, _conn, ModelPricing.Default),
+        new SecretsVault(_paths.VaultDir), PromptLibrary.Resolve());
+
+    private string ShowFromTrunk(string path) =>
+        Git.Require(_paths.ProjectBareRepo(Project), "show", $"master:{path}").Stdout;
+
+    private static string CreateTask(string title, string objective, string requirement) =>
+        ScriptedLlmClient.Tool("create_task",
+            ("title", title), ("objective", objective), ("requirements_ref", requirement));
+
+    [Fact]
+    public async Task The_principal_authors_structure_and_a_covered_task_dag()
+    {
+        SeedRequirements("01-todos.md", "02-accounts.md");
+
+        var llm = new ScriptedLlmClient(
+            ScriptedLlmClient.Tool("write_file",
+                ("path", "CONVENTIONS.md"), ("content", "# Conventions\n\nC#/.NET. xUnit. One class per file.")),
+            ScriptedLlmClient.Tool("write_file",
+                ("path", "docs/design/03-contracts/cli.md"), ("content", "# CLI\n\n`todo add <text>`")),
+            CreateTask("Todo storage", "Add and complete todos", "01-todos.md@v1"),
+            CreateTask("Accounts", "Sign up and per-user lists", "02-accounts.md@v1"),
+            ScriptedLlmClient.Tool("add_dependency", ("task", "2"), ("depends_on", "1")),
+            ScriptedLlmClient.Tool("done", ("summary", "Two modules: todos, then accounts on top.")));
+
+        var outcome = await Design(llm).RunAsync();
+
+        Assert.Equal(EndReason.Done, outcome.End);
+        Assert.Equal(2, outcome.TasksCreated);
+
+        // The structure landed in the bare repo.
+        Assert.Contains("C#/.NET", ShowFromTrunk("CONVENTIONS.md"));
+        Assert.Contains("todo add", ShowFromTrunk("docs/design/03-contracts/cli.md"));
+
+        // The task DAG is on the board, born `created`, each naming its requirement.
+        var tasks = _tasks.List();
+        Assert.Equal(2, tasks.Count);
+        Assert.All(tasks, t => Assert.Equal(TaskStatus.Created, t.Status));
+        Assert.All(tasks, t => Assert.Equal(AgentRole.Engineer, t.AssignedRole));
+        Assert.Equal(new RequirementsRef("01-todos.md", 1), tasks[0].RequirementsRef);
+
+        // The dependency edge exists: accounts waits on todos.
+        Assert.Equal([tasks[0].Id], _tasks.DependenciesOf(tasks[1].Id));
+
+        // Coverage gate: every requirement mapped.
+        Assert.True(outcome.Coverage.Complete);
+        Assert.Empty(outcome.Coverage.Uncovered);
+    }
+
+    [Fact]
+    public async Task The_coverage_gate_catches_a_requirement_with_no_task()
+    {
+        SeedRequirements("01-todos.md", "02-accounts.md");
+
+        // The Principal only covers todos and forgets accounts.
+        var llm = new ScriptedLlmClient(
+            CreateTask("Todo storage", "Add and complete todos", "01-todos.md@v1"),
+            ScriptedLlmClient.Tool("done", ("summary", "Did the todos module.")));
+
+        var outcome = await Design(llm).RunAsync();
+
+        Assert.False(outcome.Coverage.Complete);
+        Assert.Equal(["02-accounts.md"], outcome.Coverage.Uncovered);
+    }
+
+    [Fact]
+    public async Task Design_tasks_are_not_claimable_until_the_client_signs_off()
+    {
+        SeedRequirements("01-todos.md");
+        var llm = new ScriptedLlmClient(
+            CreateTask("Todo storage", "Add and complete todos", "01-todos.md@v1"),
+            ScriptedLlmClient.Tool("done", ("summary", "Designed the todos module.")));
+
+        await Design(llm).RunAsync();
+
+        // Before sign-off, the worker finds nothing — the tasks are `created`, not `ready`.
+        var runner = new Forge.Core.Scheduling.TaskRunner(
+            _paths, Project, _conn,
+            new MeteredLlmClient(new ScriptedLlmClient(), _conn, ModelPricing.Default),
+            new SecretsVault(_paths.VaultDir), PromptLibrary.Resolve());
+        Assert.Null(runner.NextTask(AgentRole.Engineer));
+
+        // Sign-off releases them.
+        var released = DesignPhase.Approve(_conn);
+        Assert.Equal(1, released);
+        Assert.Equal(TaskStatus.Ready, _tasks.List().Single().Status);
+        Assert.NotNull(runner.NextTask(AgentRole.Engineer));
+
+        // A second sign-off is a no-op — nothing left in `created`.
+        Assert.Equal(0, DesignPhase.Approve(_conn));
+    }
+
+    [Fact]
+    public async Task A_malformed_task_packet_is_refused_and_reported_not_created()
+    {
+        SeedRequirements("01-todos.md");
+
+        // First create_task has an empty objective (the factory rejects it); the
+        // Principal sees the ERROR, then creates it properly.
+        var llm = new ScriptedLlmClient(
+            ScriptedLlmClient.Tool("create_task", ("title", "Bad"), ("objective", "")),
+            CreateTask("Todo storage", "Add and complete todos", "01-todos.md@v1"),
+            ScriptedLlmClient.Tool("done", ("summary", "Recovered and created the task.")));
+
+        var outcome = await Design(llm).RunAsync();
+
+        // Only the valid task exists; the malformed one never hit the board.
+        Assert.Equal(1, outcome.TasksCreated);
+        Assert.Equal("Todo storage", _tasks.List().Single().Title);
+
+        // The refusal was delivered to the model as an observation, not a crash.
+        var observations = string.Join("\n", llm.Requests.Skip(1).Select(r => r.Messages[^1].Content));
+        Assert.Contains("ERROR:", observations);
+    }
+
+    [Fact]
+    public async Task The_principal_sees_the_whole_workspace_including_code()
+    {
+        // Unlike the PM, the Principal is a technical role and may read src/.
+        var seed = Path.Combine(_dataRoot, "seed");
+        Git.Require(_paths.ProjectDir(Project), "clone", _paths.ProjectBareRepo(Project), seed);
+        Directory.CreateDirectory(Path.Combine(seed, "src"));
+        File.WriteAllText(Path.Combine(seed, "src", "Existing.cs"), "class Existing { }");
+        Git.Require(seed, "add", "-A");
+        Git.Require(seed, "commit", "-m", "feat: seed code");
+        Git.Require(seed, "push", "origin", "master");
+        Directory.Delete(seed, recursive: true);
+
+        var llm = new ScriptedLlmClient(
+            ScriptedLlmClient.Tool("read_file", ("path", "src/Existing.cs")),
+            ScriptedLlmClient.Tool("done", ("summary", "Reviewed the existing code before designing.")));
+
+        await Design(llm).RunAsync();
+
+        // The read succeeded (no REFUSED) — the Principal's scope is the whole workspace.
+        var observation = llm.Requests[1].Messages[^1].Content;
+        Assert.Contains("class Existing", observation);
+        Assert.DoesNotContain("REFUSED", observation);
+    }
+}

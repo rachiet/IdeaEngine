@@ -139,4 +139,22 @@ public sealed class TaskRepository(IDbConnection conn)
             UPDATE tasks SET progress_note = @note, updated_at = datetime('now')
             WHERE id = @taskId
             """, new { taskId, note });
+
+    /// <summary>
+    /// An edge of the task DAG (spec §6 task_deps): taskId cannot start until
+    /// dependsOn is done. INSERT OR IGNORE so authoring the same edge twice is
+    /// harmless; a self-edge is a mistake the Principal shouldn't make and we refuse.
+    /// </summary>
+    public void AddDependency(long taskId, long dependsOn)
+    {
+        if (taskId == dependsOn)
+            throw new ArgumentException($"Task {taskId} cannot depend on itself.");
+        conn.Execute("""
+            INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (@taskId, @dependsOn)
+            """, new { taskId, dependsOn });
+    }
+
+    public IReadOnlyList<long> DependenciesOf(long taskId) =>
+        conn.Query<long>("SELECT depends_on FROM task_deps WHERE task_id = @taskId ORDER BY depends_on",
+            new { taskId }).ToList();
 }

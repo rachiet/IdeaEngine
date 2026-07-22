@@ -175,7 +175,7 @@ public class AgentRecipeTests
     [Fact]
     public void Every_built_role_is_internally_consistent()
     {
-        foreach (var recipe in new[] { AgentRecipe.Engineer, AgentRecipe.Pm })
+        foreach (var recipe in new[] { AgentRecipe.Engineer, AgentRecipe.Pm, AgentRecipe.Principal })
         {
             Assert.NotEmpty(recipe.Tools);
             Assert.All(recipe.Tools, t => Assert.Contains(t, AgentToolset.Catalogue.Keys));
@@ -187,7 +187,8 @@ public class AgentRecipeTests
     [Fact]
     public void Roles_that_arrive_in_a_later_milestone_fail_loudly_rather_than_half_working()
     {
-        foreach (var role in new[] { AgentRole.Principal, AgentRole.Qa, AgentRole.Researcher })
+        // Principal arrived in M3; QA (M5) and Researcher (later) have not.
+        foreach (var role in new[] { AgentRole.Qa, AgentRole.Researcher })
         {
             var ex = Assert.Throws<NotSupportedException>(() => AgentRecipe.For(role));
             Assert.Contains("§12", ex.Message);

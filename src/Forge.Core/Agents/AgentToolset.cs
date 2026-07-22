@@ -52,6 +52,9 @@ public sealed class AgentToolset(
             ["write_file"] = "write_file(path, content) — create or overwrite a file, whole contents.",
             ["run"] = "run(command, [cwd]) — run one binary.",
             ["add_milestone"] = "add_milestone(name, [description], [ordinal]) — add a milestone to the plan.",
+            ["create_task"] = "create_task(title, objective, [acceptance], [requirements_ref], "
+                            + "[context_paths], [budget], [milestone]) — put a task on the board. Returns its id.",
+            ["add_dependency"] = "add_dependency(task, depends_on) — task cannot start until depends_on is done.",
             ["reply"] = "reply(message) — say this to the client and end your turn.",
             ["progress_note"] = "progress_note(note) — save state for your successor.",
             ["done"] = "done(summary) — you believe the work is complete.",
@@ -84,6 +87,8 @@ public sealed class AgentToolset(
                 "write_file" => WriteFile(call),
                 "run" => await RunAsync(call, ct).ConfigureAwait(false),
                 "add_milestone" => AddMilestone(call),
+                "create_task" => CreateTask(call),
+                "add_dependency" => AddDependency(call),
                 "reply" => Reply(call),
                 "progress_note" => ProgressNote(call),
                 "done" => Done(call),
@@ -228,6 +233,49 @@ public sealed class AgentToolset(
             Ordinal = ordinal,
         });
         return new ToolOutcome($"Milestone {milestone.Id} recorded: #{ordinal} {name}.");
+    }
+
+    /// <summary>
+    /// The Principal breaks the design into board tasks (spec §7). Tasks are born
+    /// `created`, not `ready`: nothing is claimable until the client signs off on
+    /// the design, which is the gate that flips them to ready. A malformed packet
+    /// (empty title/objective, budget ≤ 0, bad requirement ref) is refused by the
+    /// factory and comes back as an ERROR the Principal can correct.
+    /// </summary>
+    private ToolOutcome CreateTask(ToolCall call)
+    {
+        var requirement = call.Optional("requirements_ref") is { } reqRef
+            ? RequirementsRef.Parse(reqRef)
+            : (RequirementsRef?)null;
+
+        var contexts = call.Optional("context_paths")?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            ?? [];
+
+        var created = _tasks.Insert(TaskRecord.Create(
+            call.Optional("type") is { } type ? SnakeCaseEnum.Parse<TaskType>(type) : TaskType.Feature,
+            call.Arg("title"),
+            call.Arg("objective"),
+            call.OptionalInt("budget") ?? 60_000,
+            acceptanceCriteria: call.Optional("acceptance"),
+            contextPaths: contexts,
+            requirementsRef: requirement,
+            milestoneId: call.OptionalInt("milestone") is { } m ? m : null,
+            assignedRole: AgentRole.Engineer,
+            createdBy: SnakeCaseEnum.ToSnakeCase(recipe.Role)));
+
+        return new ToolOutcome($"Task {created.Id} created: {created.Title} " +
+            $"(created — the client's sign-off makes it ready).");
+    }
+
+    /// <summary>A DAG edge: the task waits on its dependency. The serial worker respects it (spec §7).</summary>
+    private ToolOutcome AddDependency(ToolCall call)
+    {
+        var taskId = call.OptionalInt("task") ?? throw new ToolCallException("add_dependency needs 'task'.");
+        var dependsOn = call.OptionalInt("depends_on")
+            ?? throw new ToolCallException("add_dependency needs 'depends_on'.");
+        _tasks.AddDependency(taskId, dependsOn);
+        return new ToolOutcome($"Task {taskId} now depends on task {dependsOn}.");
     }
 
     /// <summary>

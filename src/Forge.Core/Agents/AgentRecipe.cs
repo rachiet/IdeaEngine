@@ -91,10 +91,33 @@ public sealed record AgentRecipe
     /// of them up early is the anti-pattern §12 closes on — a team you cannot feed
     /// is theatre — so an unbuilt role fails loudly here rather than half-working.
     /// </summary>
+    /// <summary>
+    /// Highest-reasoning tier per spec §3 — the strongest model authors the
+    /// structure, the system's highest-leverage artifact. Reads the requirements,
+    /// writes CONVENTIONS.md / the tree / contracts / acceptance criteria, and
+    /// breaks the work into a task DAG. Sees the whole workspace (unlike the PM):
+    /// the Principal owns technical decisions and lays out the code. No run() —
+    /// designing is not executing; the engineers it creates tasks for do that.
+    /// </summary>
+    public static AgentRecipe Principal => (new AgentRecipe
+    {
+        Role = AgentRole.Principal,
+        Model = "claude-opus-4-8",
+        RolePrompt = "principal",
+        InstancePrefix = "prin",
+        AlwaysInContext = ["PROJECT.md", "CONVENTIONS.md", "docs/requirements/INDEX.md"],
+        Tools = ["read_file", "list_dir", "grep", "write_file", "create_task", "add_dependency", "done", "escalate"],
+        Scope = PathScope.Workspace,
+        ToolAllowlist = [],
+        DefaultBudget = 200_000,
+        IterationCap = 60,
+    }).Validate();
+
     public static AgentRecipe For(AgentRole role) => role switch
     {
         AgentRole.Engineer => Engineer,
         AgentRole.Pm => Pm,
+        AgentRole.Principal => Principal,
         _ => throw new NotSupportedException(
             $"No recipe for {role} yet — roles are introduced one milestone at a time (spec §12)."),
     };
