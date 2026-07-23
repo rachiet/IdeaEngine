@@ -1,10 +1,12 @@
 using System.Data;
 using Dapper;
 using Forge.Core.Agents;
+using Forge.Core.Ci;
 using Forge.Core.Db;
 using Forge.Core.Llm;
 using Forge.Core.Logging;
 using Forge.Core.Model;
+using Forge.Core.Review;
 using Forge.Core.Secrets;
 using Forge.Core.Tools;
 using Forge.Core.Workspaces;
@@ -18,7 +20,11 @@ public sealed record TaskRunOutcome(long TaskId, EndReason End, TaskStatus Statu
 /// One serial worker (spec §1: v1 is one worker; the cap is config, not
 /// architecture). Claims a task, gives an agent instance a jailed workspace,
 /// then decides what actually happened by looking at git — not by believing the
-/// agent's report.
+/// agent's report. From M4 the "what happened" includes harness-run CI and a
+/// Principal review before merge, with a bounded revision loop back to the engineer.
+///
+/// The CI step is injectable so orchestration tests can drive the gates without a
+/// real .NET toolchain; production uses CiRunner.Run.
 /// </summary>
 public sealed class TaskRunner(
     ForgePaths paths,
@@ -27,12 +33,18 @@ public sealed class TaskRunner(
     ILlmClient llm,
     SecretsVault vault,
     PromptLibrary prompts,
-    ForgeLogger? logger = null)
+    ForgeLogger? logger = null,
+    Func<string, CiResult>? ci = null)
 {
+    /// <summary>Bound the engineer↔review loop: a task that can't pass is escalated, not retried forever.</summary>
+    private const int RevisionCap = 5;
+
     private readonly TaskRepository _tasks = new(conn);
     private readonly MessageRepository _messages = new(conn);
+    private readonly AgentInstanceRepository _instances = new(conn);
     private readonly WorkspaceManager _workspaces = new(paths, project);
     private readonly ForgeLogger _log = logger ?? ForgeLogger.Null;
+    private readonly Func<string, CiResult> _ci = ci ?? CiRunner.Run;
 
     /// <summary>
     /// Resume before claim, deliberately: a task left in_progress is a task whose
@@ -72,6 +84,11 @@ public sealed class TaskRunner(
             ?? throw new InvalidOperationException($"Task {task.Id} has no assigned role."));
         var log = _log.For(task.Id);
 
+        // A task that keeps failing CI or review is a tarpit; stop feeding it.
+        var attempts = _instances.ForTask(task.Id).Count(i => i.Role == AgentRole.Engineer);
+        if (attempts >= RevisionCap)
+            return BlockExhausted(task, log, attempts);
+
         log.Message($"Starting task {task.Id}: {task.Title}");
         task = Claim(task, log);
         var branch = task.BranchName ?? WorkspaceManager.BranchName(task);
@@ -85,7 +102,7 @@ public sealed class TaskRunner(
         var result = await loop.RunAsync(_tasks.Get(task.Id), executor, ct).ConfigureAwait(false);
 
         return result.End == EndReason.Done
-            ? Integrate(task, branch, result, log)
+            ? await IntegrateAsync(task, branch, result, log, ct).ConfigureAwait(false)
             : Park(task, result, log);
     }
 
@@ -115,14 +132,14 @@ public sealed class TaskRunner(
         conn.Execute("UPDATE tasks SET branch_name = @branch WHERE id = @taskId", new { taskId, branch });
 
     /// <summary>
-    /// The agent said it was done. Whether it was is decided here, from git.
-    ///
-    /// M1 has no reviewer and no QA, so the task walks in_review → merging → qa →
-    /// done mechanically with a status message recording that the gates were
-    /// unmanned. The state machine stays honest and M4/M5 replace these auto-passes
-    /// with real ones rather than adding new states.
+    /// The engineer said done. Whether it merges is decided here from ground truth:
+    /// git says whether there are commits, harness-run CI says whether it builds and
+    /// tests pass, and a fresh Principal says whether it's correct. Only then does it
+    /// reach trunk. CI failure or a rejected review sends it back to the engineer;
+    /// QA stays auto-passed until M5.
     /// </summary>
-    private TaskRunOutcome Integrate(TaskRecord task, string branch, AgentRunResult result, ForgeLogger log)
+    private async Task<TaskRunOutcome> IntegrateAsync(
+        TaskRecord task, string branch, AgentRunResult result, ForgeLogger log, CancellationToken ct)
     {
         _workspaces.CommitAll(task.Id, $"task({task.Id}): {task.Title}");
 
@@ -138,26 +155,94 @@ public sealed class TaskRunner(
 
         _workspaces.PushBranch(task.Id, branch);
         log.Event(EventType.GitPush, $"pushed {branch}");
-        Transition(task.Id, TaskStatus.InReview, log);
-        Notify(task.Id, MessageType.Status, "pm",
-            "M1: no reviewer configured — review gate auto-passed. Principal review lands in M4.");
 
+        // --- CI gate: harness-run, zero tokens. The Principal never reviews code that fails CI. ---
+        log.Event(EventType.CiRun, "dotnet build/test");
+        var ci = _ci(_workspaces.Path(task.Id));
+        if (!ci.Passed)
+        {
+            log.Event(EventType.CiFailed, ci.Summary);
+            return RequestRevision(task, log, "CI",
+                $"CI failed at `{ci.Step}`. Fix the build/tests and call done again.\n\n{Shorten(ci.Output, 2000)}");
+        }
+        log.Event(EventType.CiPassed, ci.Summary);
+
+        // --- Review gate: a fresh Principal reads the diff (reviewer ≠ author). ---
+        Transition(task.Id, TaskStatus.InReview, log);
+        var review = new ReviewPhase(conn, llm, vault, prompts, _log);
+        var verdict = await review.RunAsync(_tasks.Get(task.Id), branch, _workspaces, ct).ConfigureAwait(false);
+
+        if (!verdict.Approved)
+        {
+            if (verdict.Convention is { Length: > 0 } convention) WriteConvention(convention, log);
+            Transition(task.Id, TaskStatus.InProgress, log);   // back to the engineer
+            return RequestRevision(task, log, "review", verdict.Feedback);
+        }
+
+        // --- Approved: merge to trunk. QA auto-passes until M5. ---
         Transition(task.Id, TaskStatus.Merging, log);
         var sha = _workspaces.MergeToTrunk(task.Id, branch, $"merge {branch} into {WorkspaceManager.TrunkBranch}");
         log.Event(EventType.GitMerge, $"{branch} → {WorkspaceManager.TrunkBranch} @ {sha[..Math.Min(8, sha.Length)]}");
 
         Transition(task.Id, TaskStatus.Qa, log);
         Notify(task.Id, MessageType.Status, "pm",
-            "M1: no QA configured — QA gate auto-passed. Black-box QA lands in M5.");
+            "M4: no QA configured — QA gate auto-passed. Black-box QA lands in M5.");
 
         Transition(task.Id, TaskStatus.Done, log);
         _workspaces.Discard(task.Id);
 
-        var summary = $"Merged {branch} into {WorkspaceManager.TrunkBranch} at {sha[..Math.Min(8, sha.Length)]}.";
+        var summary = $"Reviewed, merged {branch} into {WorkspaceManager.TrunkBranch} at {sha[..Math.Min(8, sha.Length)]}.";
         log.Message($"Task {task.Id} complete — {summary}");
         Notify(task.Id, MessageType.Status, "pm", $"{summary} {result.ProgressNote}");
         return new TaskRunOutcome(task.Id, result.End, TaskStatus.Done, summary);
     }
+
+    /// <summary>
+    /// Send the task back to the engineer. The feedback goes into the progress note
+    /// so the resuming instance sees it in its packet immediately (the same resume
+    /// mechanism as a kill), and a review discussion records why. The workspace is
+    /// kept — the engineer revises the branch it already built.
+    /// </summary>
+    private TaskRunOutcome RequestRevision(TaskRecord task, ForgeLogger log, string stage, string feedback)
+    {
+        // CI failure leaves the task in_progress; a rejected review already stepped
+        // it back to in_progress. Either way it must end claimable for the next run.
+        var current = _tasks.Get(task.Id).Status;
+        if (current == TaskStatus.InReview) Transition(task.Id, TaskStatus.InProgress, log);
+
+        _tasks.SetProgressNote(task.Id, $"CHANGES REQUESTED ({stage}). {feedback}");
+        new DiscussionRepository(conn).Open(task.Id, "system", $"[{stage}] {feedback}");
+        log.Message($"Task {task.Id}: changes requested at {stage} — back to the engineer");
+        return new TaskRunOutcome(task.Id, EndReason.Done, TaskStatus.InProgress, $"Changes requested ({stage}).");
+    }
+
+    /// <summary>
+    /// The self-improving loop (spec §7): a reviewer's recurring-mistake rule is
+    /// appended to CONVENTIONS.md on trunk, so it is in every future engineer's
+    /// standing context — the same mistake is ruled out once, not caught repeatedly.
+    /// </summary>
+    private void WriteConvention(string convention, ForgeLogger log)
+    {
+        var wrote = _workspaces.AppendToTrunkFile(
+            paths.RoleWorkspace(project, "conventions"),
+            "CONVENTIONS.md", $"- {convention}", $"conventions: {Shorten(convention, 60)}");
+        if (wrote) log.Event(EventType.GitCommit, $"convention added from review: {Shorten(convention, 80)}");
+    }
+
+    /// <summary>Bounded revision loop tripped: block the task and hand it to the PM.</summary>
+    private TaskRunOutcome BlockExhausted(TaskRecord task, ForgeLogger log, int attempts)
+    {
+        var note = $"Task blocked after {attempts} engineer attempts without passing CI + review.";
+        var current = _tasks.Get(task.Id).Status;
+        if (current != TaskStatus.Blocked && TaskTransitions.IsLegal(current, TaskStatus.Blocked))
+            Transition(task.Id, TaskStatus.Blocked, log);
+        log.Event(EventType.ErrorInternal, note);
+        Notify(task.Id, MessageType.Escalation, "pm", note);
+        return new TaskRunOutcome(task.Id, EndReason.Iterations, TaskStatus.Blocked, note);
+    }
+
+    private static string Shorten(string text, int max) =>
+        text.Length <= max ? text : text[..max] + "…";
 
     /// <summary>
     /// Budget, iteration cap, escalation or crash. The workspace is deliberately

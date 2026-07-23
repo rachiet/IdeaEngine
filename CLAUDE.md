@@ -84,6 +84,33 @@ not ride along in that payload.
   Forge's environment would leak every key. A key added to `forge_env` tomorrow
   is therefore invisible to agents by default, with nothing to remember.
 
+### Review + CI [DECIDED] (settled while building M4)
+- **CI is harness-run, zero tokens** (`Ci/CiRunner.cs`): the harness runs
+  `dotnet build` then `dotnet test` in the task workspace itself — trusted code
+  like Git.cs, not the agent's jailed executor. No project (no .sln/.csproj) is a
+  skip, not a failure (docs-only or not-yet-scaffolded). Injectable into
+  `TaskRunner` (`Func<string,CiResult>`) so orchestration tests don't need a
+  toolchain; production uses `CiRunner.Run`.
+- **The gate order is CI, then review** (spec §7): the Principal never reviews code
+  that fails CI. `TaskRunner.IntegrateAsync`: commit → commits-ahead check → push →
+  CI → review → merge. QA still auto-passes (M5).
+- **Review is a fresh Principal instance** (`Review/ReviewPhase.cs`,
+  `AgentRecipe.PrincipalReview`) — reviewer ≠ author. Seeded with the branch diff
+  (`WorkspaceManager.DiffAgainstTrunk`), ends with `approve` or `request_changes`
+  (verdict rides `AgentRunResult`). No run() (CI already built); may write
+  CONVENTIONS.md.
+- **Revision loop back to the engineer.** CI failure or a rejected review sets the
+  progress note to the feedback and leaves the task claimable (`in_progress`), so
+  the next `forge run` resumes the engineer with the feedback in its packet — same
+  resume mechanism as a kill. Bounded: `RevisionCap` (5 engineer attempts) →
+  block + escalate to PM, counted from `agent_instances`.
+- **Self-improving write-back** (spec §7): `request_changes(reason, convention?)`
+  — the reason goes to the engineer; an optional `convention` is appended to
+  CONVENTIONS.md on trunk (`WorkspaceManager.AppendToTrunkFile`), so a recurring
+  mistake is ruled out once for every future engineer.
+- **Discussions table now used** (`Db/DiscussionRepository.cs`) — review verdicts
+  and CI-fail feedback are recorded as discussion rows, the task's rejection history.
+
 ### Design phase [DECIDED] (settled while building M3)
 - **The Principal is the same loop, seeded with a design brief** — not a chat, not
   a board task. `Design/DesignPhase.cs` runs it on a long-lived trunk clone (like

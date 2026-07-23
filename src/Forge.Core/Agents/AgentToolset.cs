@@ -42,6 +42,15 @@ public sealed class AgentToolset(
     /// <summary>What the agent last said to the client, when it is a chat role.</summary>
     public string? LastReply { get; private set; }
 
+    /// <summary>The review verdict, when this run was a Principal review. Null until decided.</summary>
+    public bool? ReviewApproved { get; private set; }
+
+    /// <summary>The review's reason (on changes requested) or note (on approval).</summary>
+    public string? ReviewFeedback { get; private set; }
+
+    /// <summary>A rule the reviewer wants added to CONVENTIONS.md for a recurring mistake.</summary>
+    public string? ReviewConvention { get; private set; }
+
     /// <summary>One line per tool, rendered into the prompt so docs cannot drift from code.</summary>
     public static readonly IReadOnlyDictionary<string, string> Catalogue =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -55,6 +64,9 @@ public sealed class AgentToolset(
             ["create_task"] = "create_task(title, objective, [acceptance], [requirements_ref], "
                             + "[context_paths], [budget], [milestone]) — put a task on the board. Returns its id.",
             ["add_dependency"] = "add_dependency(task, depends_on) — task cannot start until depends_on is done.",
+            ["approve"] = "approve([note]) — the diff is good; approve it for merge and end your review.",
+            ["request_changes"] = "request_changes(reason, [convention]) — send the work back with a reason. "
+                                + "Set convention to add a permanent rule to CONVENTIONS.md for a recurring mistake.",
             ["reply"] = "reply(message) — say this to the client and end your turn.",
             ["progress_note"] = "progress_note(note) — save state for your successor.",
             ["done"] = "done(summary) — you believe the work is complete.",
@@ -89,6 +101,8 @@ public sealed class AgentToolset(
                 "add_milestone" => AddMilestone(call),
                 "create_task" => CreateTask(call),
                 "add_dependency" => AddDependency(call),
+                "approve" => Approve(call),
+                "request_changes" => RequestChanges(call),
                 "reply" => Reply(call),
                 "progress_note" => ProgressNote(call),
                 "done" => Done(call),
@@ -276,6 +290,27 @@ public sealed class AgentToolset(
             ?? throw new ToolCallException("add_dependency needs 'depends_on'.");
         _tasks.AddDependency(taskId, dependsOn);
         return new ToolOutcome($"Task {taskId} now depends on task {dependsOn}.");
+    }
+
+    /// <summary>Review verdict: the diff is good. The harness reads the verdict and merges.</summary>
+    private ToolOutcome Approve(ToolCall call)
+    {
+        ReviewApproved = true;
+        ReviewFeedback = call.Optional("note");
+        return new ToolOutcome("Approved for merge.", EndReason.Done);
+    }
+
+    /// <summary>
+    /// Review verdict: send it back. The reason reaches the engineer; an optional
+    /// convention is the self-improving loop (spec §7) — the harness appends it to
+    /// CONVENTIONS.md so the same mistake is ruled out for every future task.
+    /// </summary>
+    private ToolOutcome RequestChanges(ToolCall call)
+    {
+        ReviewApproved = false;
+        ReviewFeedback = call.Arg("reason");
+        ReviewConvention = call.Optional("convention");
+        return new ToolOutcome("Changes requested; sending back to the engineer.", EndReason.Done);
     }
 
     /// <summary>

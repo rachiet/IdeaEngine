@@ -14,7 +14,10 @@ public sealed record AgentRunResult(
     int Iterations,
     string? ProgressNote,
     string? Detail = null,
-    string? Reply = null);
+    string? Reply = null,
+    bool? ReviewApproved = null,
+    string? ReviewFeedback = null,
+    string? ReviewConvention = null);
 
 /// <summary>
 /// The harness's inner loop (spec §4.1):
@@ -200,6 +203,7 @@ public sealed class AgentLoop(
         _instances.End(instanceId, end);
         log.Event(EventType.InstanceEnd,
             $"{instanceId} ended: {SnakeCaseEnum.ToSnakeCase(end)} after {iterations} turns");
-        return new AgentRunResult(instanceId, end, iterations, note, detail, toolset.LastReply);
+        return new AgentRunResult(instanceId, end, iterations, note, detail, toolset.LastReply,
+            toolset.ReviewApproved, toolset.ReviewFeedback, toolset.ReviewConvention);
     }
 }

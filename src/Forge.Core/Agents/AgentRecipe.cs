@@ -113,6 +113,27 @@ public sealed record AgentRecipe
         IterationCap = 60,
     }).Validate();
 
+    /// <summary>
+    /// The Principal wearing its review hat (spec §12, M4). Same role and model as
+    /// the design recipe, different job: read a diff that already passed CI and
+    /// decide if it solves the problem or just the examples. Reviewer ≠ author —
+    /// it did not write this code. It may write CONVENTIONS.md (the self-improving
+    /// write-back) but not create tasks; no run() (CI already built and tested).
+    /// </summary>
+    public static AgentRecipe PrincipalReview => (new AgentRecipe
+    {
+        Role = AgentRole.Principal,
+        Model = "claude-opus-4-8",
+        RolePrompt = "principal-review",
+        InstancePrefix = "rev",
+        AlwaysInContext = ["PROJECT.md", "CONVENTIONS.md"],
+        Tools = ["read_file", "list_dir", "grep", "write_file", "approve", "request_changes", "escalate"],
+        Scope = PathScope.Workspace,
+        ToolAllowlist = [],
+        DefaultBudget = 80_000,
+        IterationCap = 30,
+    }).Validate();
+
     public static AgentRecipe For(AgentRole role) => role switch
     {
         AgentRole.Engineer => Engineer,

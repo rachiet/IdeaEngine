@@ -70,6 +70,21 @@ public sealed class WorkspaceManager(ForgePaths paths, string project)
         return dir;
     }
 
+    /// <summary>
+    /// Append a line to a file on trunk and publish it — used by the review
+    /// write-back to add a convention. It goes to trunk directly, not through a
+    /// task branch, so the rule persists whether or not the rejected task ever merges.
+    /// </summary>
+    public bool AppendToTrunkFile(string cloneDir, string relativePath, string line, string message)
+    {
+        var dir = PrepareTrunkClone(cloneDir);
+        var path = System.IO.Path.Combine(dir, relativePath);
+        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+        var text = line.EndsWith('\n') ? line : line + "\n";
+        File.AppendAllText(path, text);
+        return CommitAndPushTrunk(dir, message);
+    }
+
     /// <summary>Commit whatever a doc-writing role changed and publish it. False when nothing changed.</summary>
     public bool CommitAndPushTrunk(string dir, string message)
     {
@@ -120,6 +135,23 @@ public sealed class WorkspaceManager(ForgePaths paths, string project)
         Git.Require(dir, "merge", "--no-ff", "-m", message, branch);
         Git.Require(dir, "push", "origin", TrunkBranch);
         return Git.Require(dir, "rev-parse", "HEAD").Output;
+    }
+
+    /// <summary>
+    /// The diff the reviewer reads: the task branch against trunk, name-status plus
+    /// the patch. Capped so a huge diff can't blow the context window — the reviewer
+    /// reads specific files with read_file when it needs more.
+    /// </summary>
+    public string DiffAgainstTrunk(long taskId, string branch, int maxChars = 20_000)
+    {
+        var dir = Path(taskId);
+        var range = $"origin/{TrunkBranch}...{branch}";
+        var names = Git.Run(dir, "diff", "--name-status", range).Output;
+        var patch = Git.Run(dir, "diff", range).Stdout;
+        var body = $"Files changed:\n{names}\n\n{patch}";
+        return body.Length <= maxChars
+            ? body
+            : body[..maxChars] + $"\n... [diff truncated at {maxChars} chars — read specific files for the rest]";
     }
 
     /// <summary>Deleted only after the work is safely in the bare repo.</summary>

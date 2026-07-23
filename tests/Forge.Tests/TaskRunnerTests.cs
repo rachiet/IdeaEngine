@@ -74,7 +74,8 @@ public class TaskRunnerTests : IDisposable
         var task = ReadyTask();
         var llm = new ScriptedLlmClient(
             ScriptedLlmClient.Tool("write_file", ("path", "greeting.txt"), ("content", "hello")),
-            ScriptedLlmClient.Tool("done", ("summary", "Created greeting.txt.")));
+            ScriptedLlmClient.Tool("done", ("summary", "Created greeting.txt.")),
+            ScriptedLlmClient.Tool("approve", ("note", "Good.")));
 
         await Runner(llm, logger).RunAsync(_tasks.Get(task.Id));
 
@@ -125,8 +126,11 @@ public class TaskRunnerTests : IDisposable
     {
         var task = ReadyTask();
         var llm = new ScriptedLlmClient(
+            // engineer
             ScriptedLlmClient.Tool("write_file", ("path", "greeting.txt"), ("content", "hello")),
-            ScriptedLlmClient.Tool("done", ("summary", "Created greeting.txt with 'hello'.")));
+            ScriptedLlmClient.Tool("done", ("summary", "Created greeting.txt with 'hello'.")),
+            // Principal review (CI skips — no .csproj — so review runs, then approves)
+            ScriptedLlmClient.Tool("approve", ("note", "Correct and simple.")));
 
         var outcome = await Runner(llm).RunNextAsync(AgentRole.Engineer);
 
@@ -198,7 +202,8 @@ public class TaskRunnerTests : IDisposable
         // --- Instance 2: a genuinely fresh client. It has never seen the conversation. ---
         var resuming = new ScriptedLlmClient(
             ScriptedLlmClient.Tool("write_file", ("path", "farewell.txt"), ("content", "bye")),
-            ScriptedLlmClient.Tool("done", ("summary", "Resumed and added farewell.txt.")));
+            ScriptedLlmClient.Tool("done", ("summary", "Resumed and added farewell.txt.")),
+            ScriptedLlmClient.Tool("approve", ("note", "Both files present; approved.")));
 
         _tasks.Transition(task.Id, TaskStatus.Ready);
         var outcome = await Runner(resuming).RunNextAsync(AgentRole.Engineer);
@@ -213,10 +218,12 @@ public class TaskRunnerTests : IDisposable
         Assert.Equal("hello\n", ShowFromTrunk("greeting.txt"));
         Assert.Equal("bye\n", ShowFromTrunk("farewell.txt"));
 
-        // Two distinct agent instances are on the record for the one task.
-        var instances = new AgentInstanceRepository(_conn).ForTask(task.Id);
-        Assert.Equal(2, instances.Count);
-        Assert.Equal([EndReason.Iterations, EndReason.Done], instances.Select(i => i.EndReason));
+        // Two distinct engineer instances worked the task (killed + resumed); the
+        // reviewer is a separate Principal instance and is not counted here.
+        var engineerInstances = new AgentInstanceRepository(_conn).ForTask(task.Id)
+            .Where(i => i.Role == AgentRole.Engineer).ToList();
+        Assert.Equal(2, engineerInstances.Count);
+        Assert.Equal([EndReason.Iterations, EndReason.Done], engineerInstances.Select(i => i.EndReason));
     }
 
     /// <summary>Drive the claim + workspace half of the runner without running the loop.</summary>
