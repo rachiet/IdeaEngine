@@ -130,6 +130,25 @@ public class ReviewAndCiTests : IDisposable
     }
 
     [Fact]
+    public async Task An_integration_failure_parks_the_task_as_blocked_instead_of_stranding_it()
+    {
+        var task = ReadyTask();
+        var llm = new ScriptedLlmClient(Engineer("greeting.txt", "hello", "Wrote greeting.txt."));
+
+        // A gate blowing up (git failure, review crash) must not leave the task in
+        // in_review/merging, which the claim query never picks up.
+        var outcome = await Runner(llm, _ => throw new InvalidOperationException("git exploded"))
+            .RunAsync(_tasks.Get(task.Id));
+
+        Assert.Equal(TaskStatus.Blocked, outcome.Status);
+        Assert.Contains("Integration failed", _tasks.Get(task.Id).ProgressNote);
+        Assert.Contains(new MessageRepository(_conn).Pending("pm"),
+            m => m.Payload.Contains("Integration failed"));
+        // The branch survived: unblocking and re-running can retry the gates.
+        Assert.True(Directory.Exists(_paths.TaskWorkspace(Project, task.Id)));
+    }
+
+    [Fact]
     public async Task A_task_that_keeps_failing_is_blocked_after_the_revision_cap()
     {
         var task = ReadyTask();

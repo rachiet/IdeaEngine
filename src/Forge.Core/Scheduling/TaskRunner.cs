@@ -84,8 +84,13 @@ public sealed class TaskRunner(
             ?? throw new InvalidOperationException($"Task {task.Id} has no assigned role."));
         var log = _log.For(task.Id);
 
-        // A task that keeps failing CI or review is a tarpit; stop feeding it.
-        var attempts = _instances.ForTask(task.Id).Count(i => i.Role == AgentRole.Engineer);
+        // A task that keeps failing CI or review is a tarpit; stop feeding it. Only
+        // instances that ended `done` count — those are submissions that reached the
+        // gates and were sent back. A budget kill, crash or iteration cap is a
+        // park-and-resume, not a failed revision, and each of those already has its
+        // own bound (the token budget itself, the iteration cap per instance).
+        var attempts = _instances.ForTask(task.Id)
+            .Count(i => i.Role == AgentRole.Engineer && i.EndReason == EndReason.Done);
         if (attempts >= RevisionCap)
             return BlockExhausted(task, log, attempts);
 
@@ -156,45 +161,65 @@ public sealed class TaskRunner(
         _workspaces.PushBranch(task.Id, branch);
         log.Event(EventType.GitPush, $"pushed {branch}");
 
-        // --- CI gate: harness-run, zero tokens. The Principal never reviews code that fails CI. ---
-        log.Event(EventType.CiRun, "dotnet build/test");
-        var ci = _ci(_workspaces.Path(task.Id));
-        if (!ci.Passed)
+        // The gates below move the task through in_review and merging — statuses the
+        // claim query never picks up. If one of them throws (a git failure, a review
+        // crash), the catch parks the task as blocked with the workspace intact, so
+        // it can be resumed like any other kill instead of stranding on the board in
+        // a state nothing will ever claim.
+        try
         {
-            log.Event(EventType.CiFailed, ci.Summary);
-            return RequestRevision(task, log, "CI",
-                $"CI failed at `{ci.Step}`. Fix the build/tests and call done again.\n\n{Shorten(ci.Output, 2000)}");
+            // --- CI gate: harness-run, zero tokens. The Principal never reviews code that fails CI. ---
+            log.Event(EventType.CiRun, "dotnet build/test");
+            var ci = _ci(_workspaces.Path(task.Id));
+            if (!ci.Passed)
+            {
+                log.Event(EventType.CiFailed, ci.Summary);
+                return RequestRevision(task, log, "CI",
+                    $"CI failed at `{ci.Step}`. Fix the build/tests and call done again.\n\n{Shorten(ci.Output, 2000)}");
+            }
+            log.Event(EventType.CiPassed, ci.Summary);
+
+            // --- Review gate: a fresh Principal reads the diff (reviewer ≠ author). ---
+            Transition(task.Id, TaskStatus.InReview, log);
+            var review = new ReviewPhase(conn, llm, vault, prompts, _log);
+            var verdict = await review.RunAsync(_tasks.Get(task.Id), branch, _workspaces, ct).ConfigureAwait(false);
+
+            if (!verdict.Approved)
+            {
+                if (verdict.Convention is { Length: > 0 } convention) WriteConvention(convention, log);
+                Transition(task.Id, TaskStatus.InProgress, log);   // back to the engineer
+                return RequestRevision(task, log, "review", verdict.Feedback);
+            }
+
+            // --- Approved: merge to trunk. QA auto-passes until M5. ---
+            Transition(task.Id, TaskStatus.Merging, log);
+            var sha = _workspaces.MergeToTrunk(task.Id, branch, $"merge {branch} into {WorkspaceManager.TrunkBranch}");
+            log.Event(EventType.GitMerge, $"{branch} → {WorkspaceManager.TrunkBranch} @ {sha[..Math.Min(8, sha.Length)]}");
+
+            Transition(task.Id, TaskStatus.Qa, log);
+            Notify(task.Id, MessageType.Status, "pm",
+                "M4: no QA configured — QA gate auto-passed. Black-box QA lands in M5.");
+
+            Transition(task.Id, TaskStatus.Done, log);
+            _workspaces.Discard(task.Id);
+
+            var summary = $"Reviewed, merged {branch} into {WorkspaceManager.TrunkBranch} at {sha[..Math.Min(8, sha.Length)]}.";
+            log.Message($"Task {task.Id} complete — {summary}");
+            Notify(task.Id, MessageType.Status, "pm", $"{summary} {result.ProgressNote}");
+            return new TaskRunOutcome(task.Id, result.End, TaskStatus.Done, summary);
         }
-        log.Event(EventType.CiPassed, ci.Summary);
-
-        // --- Review gate: a fresh Principal reads the diff (reviewer ≠ author). ---
-        Transition(task.Id, TaskStatus.InReview, log);
-        var review = new ReviewPhase(conn, llm, vault, prompts, _log);
-        var verdict = await review.RunAsync(_tasks.Get(task.Id), branch, _workspaces, ct).ConfigureAwait(false);
-
-        if (!verdict.Approved)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (verdict.Convention is { Length: > 0 } convention) WriteConvention(convention, log);
-            Transition(task.Id, TaskStatus.InProgress, log);   // back to the engineer
-            return RequestRevision(task, log, "review", verdict.Feedback);
+            var note = $"Integration failed after the engineer finished: {ex.Message} " +
+                       "The branch and workspace are intact; unblock the task to retry the gates.";
+            var current = _tasks.Get(task.Id).Status;
+            if (current != TaskStatus.Blocked && TaskTransitions.IsLegal(current, TaskStatus.Blocked))
+                Transition(task.Id, TaskStatus.Blocked, log);
+            _tasks.SetProgressNote(task.Id, note);
+            log.Event(EventType.ErrorInternal, note);
+            Notify(task.Id, MessageType.Escalation, "pm", note);
+            return new TaskRunOutcome(task.Id, result.End, TaskStatus.Blocked, note);
         }
-
-        // --- Approved: merge to trunk. QA auto-passes until M5. ---
-        Transition(task.Id, TaskStatus.Merging, log);
-        var sha = _workspaces.MergeToTrunk(task.Id, branch, $"merge {branch} into {WorkspaceManager.TrunkBranch}");
-        log.Event(EventType.GitMerge, $"{branch} → {WorkspaceManager.TrunkBranch} @ {sha[..Math.Min(8, sha.Length)]}");
-
-        Transition(task.Id, TaskStatus.Qa, log);
-        Notify(task.Id, MessageType.Status, "pm",
-            "M4: no QA configured — QA gate auto-passed. Black-box QA lands in M5.");
-
-        Transition(task.Id, TaskStatus.Done, log);
-        _workspaces.Discard(task.Id);
-
-        var summary = $"Reviewed, merged {branch} into {WorkspaceManager.TrunkBranch} at {sha[..Math.Min(8, sha.Length)]}.";
-        log.Message($"Task {task.Id} complete — {summary}");
-        Notify(task.Id, MessageType.Status, "pm", $"{summary} {result.ProgressNote}");
-        return new TaskRunOutcome(task.Id, result.End, TaskStatus.Done, summary);
     }
 
     /// <summary>

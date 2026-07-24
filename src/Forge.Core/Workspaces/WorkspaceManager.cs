@@ -141,7 +141,18 @@ public sealed class WorkspaceManager(ForgePaths paths, string project)
         // merge onto current trunk. (A genuine content overlap surfaces as a merge
         // conflict here, which is the correct place to see it.)
         Git.Require(dir, "reset", "--hard", $"origin/{TrunkBranch}");
-        Git.Require(dir, "merge", "--no-ff", "-m", message, branch);
+        try
+        {
+            Git.Require(dir, "merge", "--no-ff", "-m", message, branch);
+        }
+        catch
+        {
+            // A conflicted merge leaves MERGE_HEAD and a dirty index behind, which
+            // would wedge the workspace for the resume (`checkout branch` refuses).
+            // Abort it so the caller's park-as-blocked leaves a clean clone.
+            Git.Run(dir, "merge", "--abort");
+            throw;
+        }
         Git.Require(dir, "push", "origin", TrunkBranch);
         return Git.Require(dir, "rev-parse", "HEAD").Output;
     }
