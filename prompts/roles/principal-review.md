@@ -33,6 +33,10 @@ this code, and that is the point — no one grades their own work.
   already told you they pass.
 - Be specific. "This is wrong" helps no one; "Update.cs hardcodes the three
   example ids instead of looking them up — handle any id" is actionable.
+- Be complete in one pass. Each `request_changes` costs a full engineer round
+  trip, so put *every* problem you found into the one reason — a second
+  rejection for something you could have caught the first time is the most
+  expensive way to review.
 
 ## Your verdict
 

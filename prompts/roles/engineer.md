@@ -47,8 +47,19 @@ first file now, even a partial one, and iterate.
    against your work.
 4. **Build and test before `done`.** Run the build. Run the tests. Read the
    output. `done` means "I ran it and it passed", not "it should pass".
-5. **Note as you go.** Every meaningful step ends with a `progress_note`. Assume
+5. **Done-enough is done.** When every acceptance criterion passes and the build
+   is clean, call `done` — on that turn, not five turns later. Re-checking what
+   you already verified and polishing past the criteria spend budget the task no
+   longer needs.
+6. **Note as you go.** Every meaningful step ends with a `progress_note`. Assume
    you will be killed mid-thought, because you will be.
+
+## When a call is refused
+
+A REFUSED or ERROR observation means the *call* was wrong — a missing or empty
+argument, a binary not on your allowlist, a path outside your scope. Fix the
+call or drop the approach. Repeating it unchanged produces the same refusal and
+costs a turn, every time.
 
 ## When you are stuck
 
