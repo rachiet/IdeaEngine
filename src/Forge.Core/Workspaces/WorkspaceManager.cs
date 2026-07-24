@@ -132,6 +132,15 @@ public sealed class WorkspaceManager(ForgePaths paths, string project)
         var dir = Path(taskId);
         Git.Require(dir, "fetch", "origin");
         Git.Require(dir, "checkout", TrunkBranch);
+        // Sync local trunk to the real trunk before merging. Trunk can move under a
+        // task while it runs — a review write-back appends a convention and pushes it
+        // straight to trunk (AppendToTrunkFile), so by merge time origin/trunk is
+        // ahead of this clone's stale local trunk. Merging onto the stale copy then
+        // pushes non-fast-forward and is rejected. The working clone is disposable and
+        // the bare repo is the source of truth, so hard-reset to origin/trunk and
+        // merge onto current trunk. (A genuine content overlap surfaces as a merge
+        // conflict here, which is the correct place to see it.)
+        Git.Require(dir, "reset", "--hard", $"origin/{TrunkBranch}");
         Git.Require(dir, "merge", "--no-ff", "-m", message, branch);
         Git.Require(dir, "push", "origin", TrunkBranch);
         return Git.Require(dir, "rev-parse", "HEAD").Output;
