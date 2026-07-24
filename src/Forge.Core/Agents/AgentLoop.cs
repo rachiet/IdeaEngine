@@ -122,7 +122,10 @@ public sealed class AgentLoop(
 
             log.Event(EventType.LlmCall,
                 $"turn {turn}: {response.Usage.TokensIn + response.Usage.TokensOut} tokens " +
-                $"(in {response.Usage.TokensIn} / out {response.Usage.TokensOut})");
+                $"(in {response.Usage.TokensIn} / out {response.Usage.TokensOut}" +
+                (response.Usage.CacheReadTokens + response.Usage.CacheWriteTokens > 0
+                    ? $" / cache read {response.Usage.CacheReadTokens} write {response.Usage.CacheWriteTokens}"
+                    : "") + ")");
 
             conversation.Add(new LlmMessage("assistant", response.Content));
 
