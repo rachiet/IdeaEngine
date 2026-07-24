@@ -9,8 +9,8 @@ public sealed class ModelPricing(IReadOnlyDictionary<string, (double InPerMTok, 
 {
     public static ModelPricing Default { get; } = new(new Dictionary<string, (double, double)>
     {
-        ["claude-fable-5"] = (25.00, 125.00),
-        ["claude-opus-4"] = (15.00, 75.00),
+        ["claude-fable-5"] = (10.00, 50.00),
+        ["claude-opus-4"] = (5.00, 25.00),
         ["claude-sonnet-5"] = (3.00, 15.00),
         ["claude-haiku-4-5"] = (1.00, 5.00),
     });

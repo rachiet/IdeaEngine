@@ -63,6 +63,12 @@ public class TaskRunnerTests : IDisposable
     {
         Assert.Contains("# demo", ShowFromTrunk("PROJECT.md"));
         Assert.True(Directory.Exists(_paths.WorkspacesDir(Project)));
+
+        // The executor points HOME at the jail, so the SDK's caches land inside the
+        // workspace; the seeded .gitignore keeps commit-all from sweeping them in.
+        var ignore = ShowFromTrunk(".gitignore");
+        Assert.Contains("obj/", ignore);
+        Assert.Contains(".nuget/", ignore);
     }
 
     [Fact]

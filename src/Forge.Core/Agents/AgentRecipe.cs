@@ -86,12 +86,6 @@ public sealed record AgentRecipe
     }).Validate();
 
     /// <summary>
-    /// Roles arrive with the milestone that gives them work (spec §12): Principal
-    /// in M3, QA in M5, Researcher once its trigger is settled (§13). Standing all
-    /// of them up early is the anti-pattern §12 closes on — a team you cannot feed
-    /// is theatre — so an unbuilt role fails loudly here rather than half-working.
-    /// </summary>
-    /// <summary>
     /// Highest-reasoning tier per spec §3 — the strongest model authors the
     /// structure, the system's highest-leverage artifact. Reads the requirements,
     /// writes CONVENTIONS.md / the tree / contracts / acceptance criteria, and

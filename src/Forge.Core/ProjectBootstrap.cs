@@ -53,6 +53,24 @@ public static class ProjectBootstrap
             Git.Require(seed, "init", "--initial-branch", WorkspaceManager.TrunkBranch);
             File.WriteAllText(Path.Combine(seed, "PROJECT.md"),
                 $"# {project}\n\nCreated by Forge. Requirements and design not yet authored.\n");
+            // The tool executor points HOME at the task workspace (so agents can't
+            // read ~/forge_env), which makes the .NET SDK drop its caches —
+            // .dotnet/, .nuget/, .local/ — inside the jail. Without this file the
+            // harness's own commit-all sweeps that junk into every task branch and
+            // reviewers reject it over and over. Seeded at birth, not left for an
+            // agent to remember.
+            File.WriteAllText(Path.Combine(seed, ".gitignore"), """
+                bin/
+                obj/
+                .dotnet/
+                .nuget/
+                .local/
+                .config/
+                .cache/
+                .templateengine/
+                .aspnet/
+                Library/
+                """ + "\n");
             Git.Require(seed, "add", "-A");
             Git.Require(seed, "commit", "-m", "chore: initialise project repository");
             Git.Require(seed, "push", repoPath, WorkspaceManager.TrunkBranch);
