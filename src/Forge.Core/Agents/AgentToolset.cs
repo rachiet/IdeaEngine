@@ -61,9 +61,10 @@ public sealed class AgentToolset(
             ["write_file"] = "write_file(path, content) — create or overwrite a file, whole contents.",
             ["run"] = "run(command, [cwd]) — run one binary.",
             ["add_milestone"] = "add_milestone(name, [description], [ordinal]) — add a milestone to the plan.",
-            ["create_task"] = "create_task(title, objective, [acceptance], [requirements_ref], "
+            ["create_task"] = "create_task(title, objective, [type], [acceptance], [requirements_ref], "
                             + "[context_paths], [budget], [milestone]) — put a task on the board. Returns its id. "
-                            + "requirements_ref names the requirement file, e.g. `01-todos.md@v1` (version optional).",
+                            + "type is feature (default), bug, or chore. requirements_ref names the requirement "
+                            + "file, e.g. `01-todos.md@v1` (version optional).",
             ["add_dependency"] = "add_dependency(task, depends_on) — task cannot start until depends_on is done.",
             ["approve"] = "approve([note]) — the diff is good; approve it for merge and end your review.",
             ["request_changes"] = "request_changes(reason, [convention]) — send the work back with a reason. "
@@ -270,7 +271,7 @@ public sealed class AgentToolset(
             ?? [];
 
         var created = _tasks.Insert(TaskRecord.Create(
-            call.Optional("type") is { } type ? SnakeCaseEnum.Parse<TaskType>(type) : TaskType.Feature,
+            call.Optional("type") is { } type ? ParseRunnableTaskType(type) : TaskType.Feature,
             call.Arg("title"),
             call.Arg("objective"),
             call.OptionalInt("budget") ?? 60_000,
@@ -283,6 +284,21 @@ public sealed class AgentToolset(
 
         return new ToolOutcome($"Task {created.Id} created: {created.Title} " +
             $"(created — the client's sign-off makes it ready).");
+    }
+
+    /// <summary>
+    /// Only types with a prompts/tasks/ template can be claimed and run; any other
+    /// TaskType value would put a task on the board that crashes the runner at
+    /// spin-up (PromptLibrary throws on the missing Layer B file). Refuse it here,
+    /// where the Principal can read the error and pick a runnable type instead.
+    /// </summary>
+    private static TaskType ParseRunnableTaskType(string type)
+    {
+        var parsed = SnakeCaseEnum.Parse<TaskType>(type);
+        return parsed is TaskType.Feature or TaskType.Bug or TaskType.Chore
+            ? parsed
+            : throw new ToolCallException(
+                $"Task type '{type}' cannot be assigned to an engineer. Use feature, bug, or chore.");
     }
 
     /// <summary>

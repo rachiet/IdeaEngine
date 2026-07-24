@@ -157,21 +157,28 @@ public class DesignPhaseTests : IDisposable
         SeedRequirements("01-todos.md");
 
         // First create_task has an empty objective (the factory rejects it); the
-        // Principal sees the ERROR, then creates it properly.
+        // second names a task type with no engineer template — a task that would
+        // crash the runner at claim time, refused here instead. Then it recovers.
         var llm = new ScriptedLlmClient(
             ScriptedLlmClient.Tool("create_task", ("title", "Bad"), ("objective", "")),
+            ScriptedLlmClient.Tool("create_task",
+                ("title", "Also bad"), ("objective", "Investigate options"), ("type", "research")),
             CreateTask("Todo storage", "Add and complete todos", "01-todos.md@v1"),
             ScriptedLlmClient.Tool("done", ("summary", "Recovered and created the task.")));
 
         var outcome = await Design(llm).RunAsync();
 
-        // Only the valid task exists; the malformed one never hit the board.
+        // Only the valid task exists; the malformed ones never hit the board.
         Assert.Equal(1, outcome.TasksCreated);
         Assert.Equal("Todo storage", _tasks.List().Single().Title);
 
-        // The refusal was delivered to the model as an observation, not a crash.
+        // The refusals were delivered to the model as observations, not crashes.
         var observations = string.Join("\n", llm.Requests.Skip(1).Select(r => r.Messages[^1].Content));
         Assert.Contains("ERROR:", observations);
+        Assert.Contains("feature, bug, or chore", observations);
+
+        // The done(summary) is the design phase's client-facing summary.
+        Assert.Equal("Recovered and created the task.", outcome.Summary);
     }
 
     [Fact]

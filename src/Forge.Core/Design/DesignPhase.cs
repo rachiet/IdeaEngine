@@ -72,7 +72,10 @@ public sealed class DesignPhase(
             : $"Coverage gate: {coverage.Uncovered.Count} requirement(s) with no task: "
               + string.Join(", ", coverage.Uncovered));
 
-        var summary = result.Reply
+        // The Principal ends with done(summary), not reply — its recipe has no reply
+        // tool — so the plain-language summary for the PM and client rides the
+        // progress note. Reply is kept first for any future chat-shaped design turn.
+        var summary = result.Reply ?? result.ProgressNote
             ?? $"Design ended ({SnakeCaseEnum.ToSnakeCase(result.End)}) after {result.Iterations} turns.";
         return new DesignOutcome(result.End, created, coverage, summary);
     }
