@@ -62,7 +62,8 @@ public sealed class AgentToolset(
             ["run"] = "run(command, [cwd]) — run one binary.",
             ["add_milestone"] = "add_milestone(name, [description], [ordinal]) — add a milestone to the plan.",
             ["create_task"] = "create_task(title, objective, [acceptance], [requirements_ref], "
-                            + "[context_paths], [budget], [milestone]) — put a task on the board. Returns its id.",
+                            + "[context_paths], [budget], [milestone]) — put a task on the board. Returns its id. "
+                            + "requirements_ref names the requirement file, e.g. `01-todos.md@v1` (version optional).",
             ["add_dependency"] = "add_dependency(task, depends_on) — task cannot start until depends_on is done.",
             ["approve"] = "approve([note]) — the diff is good; approve it for merge and end your review.",
             ["request_changes"] = "request_changes(reason, [convention]) — send the work back with a reason. "
@@ -113,11 +114,13 @@ public sealed class AgentToolset(
         // Refusals are observations, not crashes: the agent should see the boundary
         // and correct, exactly as it would see a compiler error.
         catch (ToolJailViolationException ex) { return new ToolOutcome($"REFUSED: {ex.Message}"); }
-        catch (ToolCallException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
-        catch (ArgumentException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
-        catch (IOException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
-        catch (UnauthorizedAccessException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
-        catch (KeyNotFoundException ex) { return new ToolOutcome($"ERROR: {ex.Message}"); }
+        // Any other tool failure — a malformed argument, a bad requirement ref, an
+        // I/O error — is an observation the agent can correct, never a crash of the
+        // run. Cancellation is the one exception: it means the harness is stopping.
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ToolOutcome($"ERROR: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -259,7 +262,7 @@ public sealed class AgentToolset(
     private ToolOutcome CreateTask(ToolCall call)
     {
         var requirement = call.Optional("requirements_ref") is { } reqRef
-            ? RequirementsRef.Parse(reqRef)
+            ? NormalizeRequirementRef(reqRef)
             : (RequirementsRef?)null;
 
         var contexts = call.Optional("context_paths")?
@@ -280,6 +283,42 @@ public sealed class AgentToolset(
 
         return new ToolOutcome($"Task {created.Id} created: {created.Title} " +
             $"(created — the client's sign-off makes it ready).");
+    }
+
+    /// <summary>
+    /// The canonical requirement ref is <c>file.md@vN</c>, but a model will often
+    /// reach for the natural path (<c>docs/requirements/01-todos.md</c>) or omit
+    /// the version. Meet it there: strip any directory, and when the version is
+    /// missing, read it from the requirement file's "Version: N" line rather than
+    /// rejecting the whole task over a formatting nicety.
+    /// </summary>
+    private RequirementsRef NormalizeRequirementRef(string reqRef)
+    {
+        var text = reqRef.Trim();
+        var at = text.IndexOf('@');
+        var file = System.IO.Path.GetFileName(at >= 0 ? text[..at] : text);
+        if (file.Length == 0) throw new ToolCallException($"Empty requirement ref '{reqRef}'.");
+
+        if (at >= 0) return RequirementsRef.Parse($"{file}{text[at..]}");
+
+        var version = ReadRequirementVersion(file) ?? 1;
+        return new RequirementsRef(file, version);
+    }
+
+    private int? ReadRequirementVersion(string file)
+    {
+        try
+        {
+            var path = _jail.Resolve(System.IO.Path.Combine("docs", "requirements", file));
+            if (!File.Exists(path)) return null;
+            foreach (var line in File.ReadLines(path))
+            {
+                var match = Regex.Match(line, @"[Vv]ersion:\s*(\d+)");
+                if (match.Success) return int.Parse(match.Groups[1].Value);
+            }
+        }
+        catch { /* best effort — fall back to the default version */ }
+        return null;
     }
 
     /// <summary>A DAG edge: the task waits on its dependency. The serial worker respects it (spec §7).</summary>
