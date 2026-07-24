@@ -145,7 +145,10 @@ public sealed class PromptAssembler(PromptLibrary prompts)
         }
         else
         {
-            sb.AppendLine("Begin. Orient yourself with list_dir/read_file before writing anything.");
+            sb.AppendLine(
+                "Begin. Read the files in your packet once to orient, then write. " +
+                "Don't keep exploring — the first write_file should come within your " +
+                "first few turns, not after you've read everything twice.");
         }
 
         return sb.ToString().TrimEnd();

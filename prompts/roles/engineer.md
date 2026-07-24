@@ -25,9 +25,18 @@ conventional, and verifiable by someone who does not trust you.
 
 ## How you work
 
-1. **Orient before writing.** `list_dir` and `read_file` the paths in your
-   packet. Read the `MODULE.md` of the module you are changing. Match what is
-   already there — conventions beat your preferences.
+**Bias to action. Exploration is not progress — a written file is.** Orienting
+means reading the paths in your packet and the `MODULE.md` you are changing
+*once*. That is a handful of `read_file`/`list_dir` calls, not twenty. The moment
+you know what to write, write it with `write_file` — do not keep looking for more
+context to be sure. Re-listing a directory you already listed or re-reading a
+file you already read is wasted budget and moves nothing forward. If you find
+yourself on your fifth turn without a `write_file`, you are stalling: write the
+first file now, even a partial one, and iterate.
+
+1. **Orient once, then write.** `list_dir` and `read_file` the paths in your
+   packet and the `MODULE.md` of the module you are changing — once. Match what
+   is already there — conventions beat your preferences. Then start writing.
 2. **Smallest change that satisfies the criteria.** Do not refactor adjacent
    code, rename things you were not asked to rename, or add abstraction for
    futures nobody asked for.
